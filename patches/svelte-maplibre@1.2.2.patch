@@ -1,0 +1,79 @@
+diff --git a/node_modules/svelte-maplibre/.bun-tag-b19b45c89e189e1f b/.bun-tag-b19b45c89e189e1f
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/svelte-maplibre/.bun-tag-f3cbcdb9e2479269 b/.bun-tag-f3cbcdb9e2479269
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/Popup.svelte b/dist/Popup.svelte
+index 0193f8697eea558bf16af029b5bd1e6fbf422452..0c33864a0ea11f59b8d8a94c2a2b903a5299fe15 100644
+--- a/dist/Popup.svelte
++++ b/dist/Popup.svelte
+@@ -189,7 +189,7 @@
+     }
+   });
+ 
+-  function tryToOpen() {
++  export function tryToOpen() {
+     if (canOpen && !canOpen(features)) {
+       open = false;
+       return;
+@@ -198,6 +198,10 @@
+     open = true;
+   }
+ 
++  export function close() {
++    open = false;
++  }
++
+   function skipHandlingEvent(e: MapLayerMouseEvent | LayerEvent) {
+     if (!openIfTopMost) {
+       return false;
+@@ -427,21 +431,21 @@
+ </script>
+ 
+ {#if children}
+-  <div bind:this={popupEl} class="sv-popup">
+-    {#if features?.length || popupTarget?.value instanceof maplibregl.Marker || (!popupTarget && open)}
+-      {@render children?.({
+-        features,
+-        data: features?.[0] ?? undefined,
+-        map: map,
+-        close: () => (open = false),
+-        isOpen: open,
+-      })}
+-    {/if}
+-  </div>
++	<div bind:this={popupEl} class="sv-popup">
++		{#if features?.length || popupTarget?.value instanceof maplibregl.Marker || (!popupTarget && open)}
++			{@render children?.({
++				features,
++				data: features?.[0] ?? undefined,
++				map: map,
++				close: () => (open = false),
++				isOpen: open
++			})}
++		{/if}
++	</div>
+ {/if}
+ 
+ <style>
+-  :global(.sv-maplibregl-popup) {
+-    z-index: 200;
+-  }
++	:global(.sv-maplibregl-popup) {
++		z-index: 200;
++	}
+ </style>
+diff --git a/dist/Popup.svelte.d.ts b/dist/Popup.svelte.d.ts
+index b889a4e730efeb814272a10b9528c919f5cc9485..9aec17962f4a1ef911cd7c885a811862416aa04d 100644
+--- a/dist/Popup.svelte.d.ts
++++ b/dist/Popup.svelte.d.ts
+@@ -47,7 +47,7 @@ declare class __sveltets_Render<DATA = Feature> {
+     events(): {};
+     slots(): {};
+     bindings(): "lngLat" | "open";
+-    exports(): {};
++    exports(): { tryToOpen: () => void, close: () => void };
+ }
+ interface $$IsomorphicComponent {
+     new <DATA = Feature>(options: import('svelte').ComponentConstructorOptions<ReturnType<__sveltets_Render<DATA>['props']>>): import('svelte').SvelteComponent<ReturnType<__sveltets_Render<DATA>['props']>, ReturnType<__sveltets_Render<DATA>['events']>, ReturnType<__sveltets_Render<DATA>['slots']>> & {
