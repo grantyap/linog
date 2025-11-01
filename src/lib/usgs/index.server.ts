@@ -1,63 +1,4 @@
-import * as z from 'zod';
-
-export const geometrySchema = z.object({
-	type: z.literal('Point'),
-	coordinates: z.tuple([z.number(), z.number(), z.number()]) // [longitude, latitude, depth]
-});
-
-export const propertiesSchema = z.object({
-	mag: z.number().nullable(),
-	place: z.string(),
-	time: z.number(),
-	updated: z.number(),
-	tz: z.number().nullable(),
-	url: z.url(),
-	detail: z.url(),
-	felt: z.number().nullable(),
-	cdi: z.number().nullable(),
-	mmi: z.number().nullable(),
-	alert: z.string().nullable(),
-	status: z.string(),
-	tsunami: z.number(),
-	sig: z.number(),
-	net: z.string(),
-	code: z.string(),
-	ids: z.string(),
-	sources: z.string(),
-	types: z.string(),
-	nst: z.number().nullable(),
-	dmin: z.number().nullable(),
-	rms: z.number().nullable(),
-	gap: z.number().nullable(),
-	magType: z.string().nullable(),
-	type: z.string(),
-	title: z.string()
-});
-
-export const featureSchema = z.object({
-	type: z.literal('Feature'),
-	properties: propertiesSchema,
-	geometry: geometrySchema,
-	id: z.string()
-});
-
-export const metadataSchema = z.object({
-	generated: z.number(),
-	url: z.url(),
-	title: z.string(),
-	status: z.number(),
-	api: z.string(),
-	count: z.number()
-});
-
-export const earthquakeDataSchema = z.object({
-	type: z.literal('FeatureCollection'),
-	metadata: metadataSchema,
-	features: z.array(featureSchema)
-});
-
-// Type inference
-export type EarthquakeData = z.infer<typeof earthquakeDataSchema>;
+import { earthquakeDataSchema } from './schema';
 
 let cache: {
 	response: Response;
@@ -67,14 +8,29 @@ let cache: {
 	cachedAt: number | null;
 } | null = null;
 
-export async function fetchEarthquakes({ fetch = globalThis.fetch }) {
+export async function fetchEarthquakes({
+	fetch = globalThis.fetch,
+	ifModifiedSince
+}: {
+	fetch?: typeof globalThis.fetch;
+	ifModifiedSince?: Date | string | null;
+}) {
 	const url = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson';
 	const asEarthQuakeData = async (response: Response) => {
 		return earthquakeDataSchema.parse(await response.json());
 	};
 
 	const headers: Record<string, string> = {};
-	if (cache) {
+	const ifModifiedSinceHeader =
+		ifModifiedSince instanceof Date
+			? ifModifiedSince.toUTCString()
+			: typeof ifModifiedSince === 'string'
+				? ifModifiedSince
+				: null;
+
+	if (ifModifiedSinceHeader) {
+		headers['if-modified-since'] = ifModifiedSinceHeader;
+	} else if (cache) {
 		if (cache.lastModified) {
 			headers['if-modified-since'] = cache.lastModified;
 		}
@@ -86,7 +42,11 @@ export async function fetchEarthquakes({ fetch = globalThis.fetch }) {
 		if (cache.expiresAt && Date.now() < cache.expiresAt) {
 			console.log(new Date(), 'Cache hit!');
 			const response = cache.response.clone();
-			return asEarthQuakeData(response);
+			return {
+				data: await asEarthQuakeData(response),
+				lastModified: cache.lastModified,
+				status: 200
+			};
 		}
 	}
 
@@ -94,12 +54,24 @@ export async function fetchEarthquakes({ fetch = globalThis.fetch }) {
 	const response = await fetch(url, { headers });
 
 	// 304 Not Modified - return cached response
-	if (response.status === 304 && cache) {
+	if (response.status === 304) {
 		console.log(new Date(), 'Cache miss, no updates');
 
-		// Update expiration if new Cache-Control provided
-		updateCacheExpiry(cache, response);
-		return asEarthQuakeData(cache.response.clone());
+		if (ifModifiedSinceHeader) {
+			return { data: null, lastModified: null, status: 304 };
+		}
+
+		if (cache) {
+			// Update expiration if new Cache-Control provided
+			updateCacheExpiry(cache, response);
+			return {
+				data: await asEarthQuakeData(cache.response.clone()),
+				lastModified: cache.lastModified,
+				status: 200
+			};
+		}
+
+		return { data: null, lastModified: null, status: 304 };
 	}
 
 	// 200 OK - cache the new response
@@ -115,16 +87,24 @@ export async function fetchEarthquakes({ fetch = globalThis.fetch }) {
 			`Cache miss, new updates.${expiresAt ? ' Expiry: ' + new Date(expiresAt).toISOString() : ''}`
 		);
 
-		cache = {
-			response: clonedResponse,
-			lastModified,
-			etag,
-			expiresAt,
-			cachedAt: Date.now()
-		};
+		const data = await asEarthQuakeData(response);
+
+		if (!ifModifiedSinceHeader) {
+			cache = {
+				response: clonedResponse,
+				lastModified,
+				etag,
+				expiresAt,
+				cachedAt: Date.now()
+			};
+		}
+
+		return { data, lastModified, status: 200 };
 	}
 
-	return asEarthQuakeData(response);
+	// This will throw for non-ok responses if they are not valid json.
+	const data = await asEarthQuakeData(response);
+	return { data, lastModified: null, status: response.status };
 }
 
 function calculateExpiry(cacheControl: string | null) {

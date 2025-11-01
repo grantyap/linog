@@ -1,9 +1,11 @@
-import { fetchEarthquakes } from '$lib/server/usgs';
+import { fetchEarthquakes } from '$lib/usgs/index.server';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ fetch }) => {
-	const earthquakes = await fetchEarthquakes({ fetch });
+	const { data, lastModified } = await fetchEarthquakes({ fetch });
+
 	return {
-		earthquakes
+		earthquakes: data,
+		lastModified
 	};
 };

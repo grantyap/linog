@@ -1,26 +1,27 @@
 <script lang="ts">
-	import { invalidateAll } from '$app/navigation';
+	import linogLogo from '$lib/assets/Linog.ph logo.svg';
 	import * as Accordion from '$lib/components/ui/accordion';
 	import Button from '$lib/components/ui/button/button.svelte';
 	import * as Empty from '$lib/components/ui/empty';
 	import * as Select from '$lib/components/ui/select';
 	import { Spinner } from '$lib/components/ui/spinner';
 	import { formatDateWithTimezone, timeAgo } from '$lib/datetime';
+	import { earthquakeDataSchema } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
 	import { EarthIcon, ExternalLinkIcon, LocateIcon } from '@lucide/svelte';
 	import { tick } from 'svelte';
 	import { MapLibre, Marker } from 'svelte-maplibre';
 	import { MediaQuery } from 'svelte/reactivity';
 	import type { PageProps } from './$types';
-	import linogLogo from '$lib/assets/Linog.ph logo.svg';
 
 	const CENTER = [121.774, 12.8797] satisfies [number, number];
-	const REFRESH_INTERVAL_MS = 15_000;
+	const REFRESH_INTERVAL_MS = 10_000;
 
 	const { data }: PageProps = $props();
-	type Feature = (typeof data.earthquakes.features)[number];
+	type Feature = NonNullable<(typeof data)['earthquakes']>['features'][number];
 
 	let now = $state(new Date());
+
 	const filterOptions = [
 		{
 			value: 'pastHour',
@@ -82,25 +83,71 @@
 	let sort = $state<(typeof sortOptions)[number]['value']>('newest');
 	let sortTriggerContent = $derived(sortOptions.find((f) => f.value === sort)?.label ?? '');
 
-	const earthquakes = $derived.by(() => {
-		return {
-			...data.earthquakes,
-			features: data.earthquakes.features
-				.filter((f) => {
-					if (!f.properties.place.toLowerCase().includes('philippines')) {
-						return false;
-					}
+	let earthquakes = $state(data.earthquakes);
+	let lastModified = $state(data.lastModified);
+	let isRefreshing = $state(false);
+	$effect(() => {
+		const id = setInterval(async () => {
+			isRefreshing = true;
+			const response = await fetch('/api/earthquakes', {
+				headers: {
+					'if-modified-since': lastModified ?? ''
+				}
+			});
 
-					const option = filterOptions.find((o) => o.value === filter);
-					if (!option) return false;
-					return option.check(new Date(f.properties.time));
-				})
-				.toSorted((a, b) => {
-					const option = sortOptions.find((o) => o.value === sort);
-					if (!option) return 0;
-					return option.sort(a, b);
-				})
+			if (response.status === 304) {
+				isRefreshing = false;
+				return;
+			}
+
+			if (response.ok) {
+				const newEarthquakes = earthquakeDataSchema.parse(await response.json());
+				lastModified = response.headers.get('last-modified');
+
+				if (newEarthquakes) {
+					if (!earthquakes) {
+						earthquakes = newEarthquakes;
+					} else {
+						const newFeatures = newEarthquakes.features.filter(
+							(newFeature) =>
+								!earthquakes?.features.some((oldFeature) => oldFeature.id === newFeature.id)
+						);
+
+						if (newFeatures.length > 0) {
+							earthquakes.features = [...newFeatures, ...earthquakes.features];
+						}
+					}
+				}
+			}
+
+			isRefreshing = false;
+		}, REFRESH_INTERVAL_MS);
+
+		return () => {
+			clearInterval(id);
 		};
+	});
+
+	const filteredEarthquakes = $derived.by(() => {
+		if (!earthquakes) {
+			return [];
+		}
+
+		return earthquakes.features
+			.filter((f) => {
+				if (!f.properties.place.toLowerCase().includes('philippines')) {
+					return false;
+				}
+
+				const option = filterOptions.find((o) => o.value === filter);
+				if (!option) return false;
+				return option.check(new Date(f.properties.time));
+			})
+			.toSorted((a, b) => {
+				const option = sortOptions.find((o) => o.value === sort);
+				if (!option) return 0;
+				return option.sort(a, b);
+			});
 	});
 
 	function getMagnitudeColor(mag: number) {
@@ -110,20 +157,6 @@
 		if (mag < 8) return 'bg-red-200 text-red-600 dark:bg-red-800 dark:text-red-200';
 		return 'bg-purple-200 text-purple-600 dark:bg-purple-800 dark:text-purple-200';
 	}
-
-	let isRefreshing = $state(false);
-	$effect(() => {
-		const id = setInterval(() => {
-			isRefreshing = true;
-			invalidateAll().finally(() => {
-				isRefreshing = false;
-			});
-		}, REFRESH_INTERVAL_MS);
-
-		return () => {
-			clearInterval(id);
-		};
-	});
 
 	$effect(() => {
 		const id = setInterval(() => {
@@ -174,9 +207,9 @@
 				class="flex flex-col-reverse items-start justify-between gap-x-6 gap-y-2 @md/panel:flex-row"
 			>
 				<div class="grow">
-					<h1 class="text-xs font-medium text-muted-foreground">{earthquakes.metadata.title}</h1>
+					<h1 class="text-xs font-medium text-muted-foreground">{earthquakes?.metadata.title}</h1>
 					<p class="text-xs text-muted-foreground">
-						Last updated {data.lastUpdated.toLocaleString()}
+						Last updated {lastModified ? lastModified.toLocaleString() : now.toLocaleString()}
 						{#if isRefreshing}
 							<Spinner class="ml-1 inline h-[1lh] align-text-bottom" aria-hidden="true" />
 						{/if}
@@ -185,7 +218,7 @@
 				<img src={linogLogo} alt="Linog logo" class="h-4 shrink @md/panel:h-8" />
 			</div>
 			<p class="my-2 text-sm">
-				<span class="font-bold">{earthquakes.metadata.count.toLocaleString()}</span>
+				<span class="font-bold">{earthquakes?.metadata.count.toLocaleString()}</span>
 				in the past month
 			</p>
 			<div class="flex flex-col gap-2 @xs/panel:flex-row">
@@ -215,7 +248,7 @@
 				</Select.Root>
 			</div>
 		</div>
-		{#if earthquakes.features.length === 0}
+		{#if filteredEarthquakes.length === 0}
 			<Empty.Root>
 				<Empty.Header>
 					<Empty.Media variant="icon">
@@ -235,7 +268,7 @@
 						return;
 					}
 
-					const feature = earthquakes.features.find((f) => f.id === e);
+					const feature = filteredEarthquakes.find((f) => f.id === e);
 					if (!feature) {
 						return;
 					}
@@ -247,7 +280,7 @@
 				}}
 				class="flex-1 overflow-auto px-4 pb-4 [&>li]:not-first:mt-2"
 			>
-				{#each earthquakes.features as feature (feature.id)}
+				{#each filteredEarthquakes as feature (feature.id)}
 					{@const time = new Date(feature.properties.time)}
 					<Accordion.Item value={feature.id} data-id={feature.id}>
 						<Accordion.Trigger class="group flex items-center gap-2 !no-underline">
@@ -336,7 +369,7 @@
 			standardControls
 			style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 		>
-			{#each earthquakes.features as feature (feature.id)}
+			{#each filteredEarthquakes as feature (feature.id)}
 				{@const lngLat = [
 					feature.geometry.coordinates[0],
 					feature.geometry.coordinates[1]
