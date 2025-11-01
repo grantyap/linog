@@ -1,12 +1,12 @@
 import * as z from 'zod';
 
-const geometrySchema = z.object({
+export const geometrySchema = z.object({
 	type: z.literal('Point'),
 	coordinates: z.tuple([z.number(), z.number(), z.number()]) // [longitude, latitude, depth]
 });
 
-const propertiesSchema = z.object({
-	mag: z.number(),
+export const propertiesSchema = z.object({
+	mag: z.number().nullable(),
 	place: z.string(),
 	time: z.number(),
 	updated: z.number(),
@@ -27,21 +27,21 @@ const propertiesSchema = z.object({
 	types: z.string(),
 	nst: z.number().nullable(),
 	dmin: z.number().nullable(),
-	rms: z.number(),
+	rms: z.number().nullable(),
 	gap: z.number().nullable(),
-	magType: z.string(),
-	type: z.literal('earthquake'),
+	magType: z.string().nullable(),
+	type: z.string(),
 	title: z.string()
 });
 
-const featureSchema = z.object({
+export const featureSchema = z.object({
 	type: z.literal('Feature'),
 	properties: propertiesSchema,
 	geometry: geometrySchema,
 	id: z.string()
 });
 
-const metadataSchema = z.object({
+export const metadataSchema = z.object({
 	generated: z.number(),
 	url: z.url(),
 	title: z.string(),
@@ -50,24 +50,14 @@ const metadataSchema = z.object({
 	count: z.number()
 });
 
-const earthquakeDataSchema = z.object({
+export const earthquakeDataSchema = z.object({
 	type: z.literal('FeatureCollection'),
 	metadata: metadataSchema,
 	features: z.array(featureSchema)
 });
 
 // Type inference
-type EarthquakeData = z.infer<typeof earthquakeDataSchema>;
-
-// Export schemas
-export {
-	earthquakeDataSchema as EarthquakeDataSchema,
-	featureSchema as FeatureSchema,
-	propertiesSchema as PropertiesSchema,
-	geometrySchema as GeometrySchema,
-	metadataSchema as MetadataSchema,
-	type EarthquakeData
-};
+export type EarthquakeData = z.infer<typeof earthquakeDataSchema>;
 
 let cache: {
 	response: Response;
@@ -78,7 +68,7 @@ let cache: {
 } | null = null;
 
 export async function fetchEarthquakes({ fetch = globalThis.fetch }) {
-	const url = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_month.geojson';
+	const url = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson';
 	const asEarthQuakeData = async (response: Response) => {
 		return earthquakeDataSchema.parse(await response.json());
 	};

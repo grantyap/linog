@@ -74,7 +74,7 @@
 			value: 'largestMagnitude',
 			label: 'Largest magnitude',
 			sort: (a: Feature, b: Feature) => {
-				return b.properties.mag - a.properties.mag;
+				return (b.properties.mag ?? 0) - (a.properties.mag ?? 0);
 			}
 		}
 	] as const;
@@ -142,13 +142,16 @@
 			return;
 		}
 
-		const feature = accordionRef.querySelector(`[data-id="${id}"]`);
+		const feature = accordionRef.querySelector(`[data-id="${id}"] [data-slot="accordion-trigger"]`);
 		if (!feature) {
 			return;
 		}
 
 		await tick();
-		feature.scrollIntoView({ behavior: 'smooth' });
+		feature.scrollIntoView({
+			behavior: 'smooth',
+			block: 'nearest'
+		});
 	}
 
 	let map = $state<maplibregl.Map>();
@@ -251,11 +254,11 @@
 							<div
 								class={cn(
 									'rounded-md px-1.5 py-0.5 text-2xl font-medium tracking-tight',
-									getMagnitudeColor(feature.properties.mag)
+									getMagnitudeColor(feature.properties.mag ?? 0)
 								)}
-								aria-label="Magnitude {feature.properties.mag.toFixed(1)} -"
+								aria-label="Magnitude {(feature.properties.mag ?? 0).toFixed(1)} -"
 							>
-								{feature.properties.mag.toFixed(1)}
+								{(feature.properties.mag ?? 0).toFixed(1)}
 							</div>
 							<div class="flex-1">
 								<div class="font-medium group-hover:underline">
@@ -338,7 +341,7 @@
 					feature.geometry.coordinates[0],
 					feature.geometry.coordinates[1]
 				] satisfies [number, number]}
-				{@const normalizedMagnitude = normalizeMagnitude(feature.properties.mag)}
+				{@const normalizedMagnitude = normalizeMagnitude(feature.properties.mag ?? 0)}
 				<Marker
 					{lngLat}
 					onclick={async () => {
