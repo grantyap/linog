@@ -9,6 +9,7 @@
 	import { earthquakeDataSchema } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
 	import { EarthIcon, ExternalLinkIcon, LocateIcon } from '@lucide/svelte';
+	import { mode } from 'mode-watcher';
 	import { tick } from 'svelte';
 	import { MapLibre, Marker } from 'svelte-maplibre';
 	import type { PageProps } from './$types';
@@ -139,12 +140,105 @@
 			});
 	});
 
+	// function getMagnitudeColor(mag: number) {
+	// 	if (mag < 2) return 'bg-green-200 text-green-600 dark:bg-green-800 dark:text-green-200';
+	// 	if (mag < 4) return 'bg-yellow-200 text-yellow-600 dark:bg-yellow-800 dark:text-yellow-200';
+	// 	if (mag < 6) return 'bg-orange-200 text-orange-600 dark:bg-orange-800 dark:text-orange-200';
+	// 	if (mag < 8) return 'bg-red-200 text-red-600 dark:bg-red-800 dark:text-red-200';
+	// 	return 'bg-purple-200 text-purple-600 dark:bg-purple-800 dark:text-purple-200';
+	// }
+
 	function getMagnitudeColor(mag: number) {
-		if (mag < 2) return 'bg-green-200 text-green-600 dark:bg-green-800 dark:text-green-200';
-		if (mag < 4) return 'bg-yellow-200 text-yellow-600 dark:bg-yellow-800 dark:text-yellow-200';
-		if (mag < 6) return 'bg-orange-200 text-orange-600 dark:bg-orange-800 dark:text-orange-200';
-		if (mag < 8) return 'bg-red-200 text-red-600 dark:bg-red-800 dark:text-red-200';
-		return 'bg-purple-200 text-purple-600 dark:bg-purple-800 dark:text-purple-200';
+		const asClassValue = ({
+			foregroundLight,
+			foregroundDark,
+			backgroundLight,
+			backgroundDark
+		}: {
+			foregroundLight: string;
+			foregroundDark: string;
+			backgroundLight: string;
+			backgroundDark: string;
+		}) => {
+			// return `--magnitude-fg-color: light-dark(var(${foregroundLight}, var(${foregroundDark}))); --magnitude-bg-color: light-dark(var(${backgroundLight}, var(${backgroundDark})));`;
+			// return `--magnitude-fg-color: var(${foregroundLight}); --magnitude-bg-color: var(${backgroundLight});`;
+			return [
+				`--magnitude-fg-color: var(${foregroundLight})`,
+				`--magnitude-fg-color-dark: var(${foregroundDark})`,
+				`--magnitude-bg-color: var(${backgroundLight})`,
+				`--magnitude-bg-color-dark: var(${backgroundDark})`
+			].join('; ');
+		};
+
+		if (mag < 2) {
+			return asClassValue({
+				foregroundLight: '--color-green-600',
+				foregroundDark: '--color-green-200',
+				backgroundLight: '--color-green-200',
+				backgroundDark: '--color-green-800'
+			});
+		}
+		if (mag < 4) {
+			return asClassValue({
+				foregroundLight: '--color-yellow-600',
+				foregroundDark: '--color-yellow-200',
+				backgroundLight: '--color-yellow-200',
+				backgroundDark: '--color-yellow-800'
+			});
+		}
+		if (mag < 6) {
+			return asClassValue({
+				foregroundLight: '--color-orange-600',
+				foregroundDark: '--color-orange-200',
+				backgroundLight: '--color-orange-200',
+				backgroundDark: '--color-orange-800'
+			});
+		}
+		if (mag < 8) {
+			return asClassValue({
+				foregroundLight: '--color-red-600',
+				foregroundDark: '--color-red-200',
+				backgroundLight: '--color-red-200',
+				backgroundDark: '--color-red-800'
+			});
+		}
+		return asClassValue({
+			foregroundLight: '--color-purple-600',
+			foregroundDark: '--color-purple-200',
+			backgroundLight: '--color-purple-200',
+			backgroundDark: '--color-purple-800'
+		});
+	}
+
+	function asIntensity(value: number) {
+		if (value >= 10) {
+			return 'X';
+		}
+		if (value >= 9) {
+			return 'IX';
+		}
+		if (value >= 8) {
+			return 'VIII';
+		}
+		if (value >= 7) {
+			return 'VII';
+		}
+		if (value >= 6) {
+			return 'VI';
+		}
+		if (value >= 5) {
+			return 'V';
+		}
+		if (value >= 4) {
+			return 'IV';
+		}
+		if (value >= 3) {
+			return 'III';
+		}
+		if (value >= 2) {
+			return 'II';
+		}
+		return 'I';
 	}
 
 	$effect(() => {
@@ -202,7 +296,7 @@
 						{/if}
 					</p>
 				</div>
-				<img src={linogLogo} alt="Linog logo" class="h-4 shrink @md/panel:h-8" />
+				<img src={linogLogo} alt="Linog logo" class="h-4 shrink @md/panel:h-8 dark:invert" />
 			</div>
 			<p class="my-2 text-sm">
 				<span class="font-bold">{earthquakes?.metadata.count.toLocaleString()}</span>
@@ -236,7 +330,7 @@
 			</div>
 		</div>
 		{#if filteredEarthquakes.length === 0}
-			<Empty.Root>
+			<Empty.Root class="select-none">
 				<Empty.Header>
 					<Empty.Media variant="icon">
 						<EarthIcon />
@@ -270,21 +364,31 @@
 				{#each filteredEarthquakes as feature (feature.id)}
 					{@const time = new Date(feature.properties.time)}
 					<Accordion.Item value={feature.id} data-id={feature.id}>
-						<Accordion.Trigger class="group flex items-center gap-2 !no-underline">
-							<div
-								class={cn(
-									'rounded-md px-1.5 py-0.5 text-2xl font-medium tracking-tight',
-									getMagnitudeColor(feature.properties.mag ?? 0)
-								)}
-								aria-label="Magnitude {(feature.properties.mag ?? 0).toFixed(1)} -"
-							>
-								{(feature.properties.mag ?? 0).toFixed(1)}
+						<Accordion.Trigger class="group flex items-center gap-4 !no-underline">
+							<div class="relative">
+								<div
+									class="rounded-md bg-(--magnitude-bg-color) px-1.5 py-0.5 text-2xl font-medium tracking-tight text-(--magnitude-fg-color) dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
+									style={getMagnitudeColor(feature.properties.mag ?? 0)}
+									aria-label="Magnitude {(feature.properties.mag ?? 0).toFixed(1)} -"
+								>
+									{(feature.properties.mag ?? 0).toFixed(1)}
+								</div>
+								{#if feature.properties.mmi}
+									<div
+										class="absolute -right-2 -bottom-3.5 rounded-full border border-(--magnitude-fg-color)/25 bg-(--magnitude-bg-color) px-1 py-0.5 text-xs font-bold text-(--magnitude-fg-color) dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
+										style={getMagnitudeColor(feature.properties.mmi ?? 0)}
+									>
+										{asIntensity(feature.properties.mmi)}
+									</div>
+								{/if}
 							</div>
 							<div class="flex-1">
 								<div class="font-medium group-hover:underline">
 									{feature.properties.place}
 								</div>
-								<div class="font-normal text-muted-foreground">{formatDateWithTimezone(time)}</div>
+								<div class="text-xs font-normal text-muted-foreground">
+									{formatDateWithTimezone(time)}
+								</div>
 							</div>
 						</Accordion.Trigger>
 						<Accordion.Content class="space-y-2">
@@ -334,12 +438,9 @@
 			</Accordion.Root>
 		{/if}
 		<p class="my-1 text-center text-xs text-muted-foreground">
-			Created by <a href="https://grantyap.com" target="_blank" class="underline"
-				>Grant Yap <ExternalLinkIcon
-					class="inline-block size-3 align-baseline"
-					aria-hidden="true"
-				/></a
-			>
+			<a href="https://grantyap.com" target="_blank" class="underline">
+				Grant Yap <ExternalLinkIcon class="inline-block size-3 align-baseline" aria-hidden="true" />
+			</a>
 			&middot; Data from
 			<a href="https://earthquake.usgs.gov/earthquakes/map/" target="_blank" class="underline">
 				U.S. Geological Survey
@@ -354,7 +455,9 @@
 			zoom={5}
 			class="h-[40svh] md:h-full"
 			standardControls
-			style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+			style={mode.current === 'light'
+				? 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
+				: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'}
 		>
 			{#each filteredEarthquakes as feature (feature.id)}
 				{@const lngLat = [
@@ -375,7 +478,7 @@
 							`--normalized-magnitude: ${normalizedMagnitude}`,
 							`--lightness: calc((var(--max-lightness) - var(--min-lightness)) * var(--normalized-magnitude) + var(--min-lightness))`,
 							`--inverted-lightness: calc((var(--max-lightness) - var(--min-lightness)) * (1 - var(--normalized-magnitude)) + var(--min-lightness))`,
-							`--color: oklch(from var(--chart-1) var(--inverted-lightness) c h)`,
+							`--color: oklch(from var(--color-orange-500) var(--inverted-lightness) c h)`,
 							`--size: calc(var(--normalized-magnitude) * var(--spacing) * 10)`
 						].join('; ')}
 						class={cn(

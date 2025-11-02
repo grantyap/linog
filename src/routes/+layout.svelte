@@ -4,6 +4,7 @@
 	import faviconIco from '$lib/assets/favicon.ico';
 	import webManifest from '$lib/assets/site.webmanifest';
 	import { Toaster } from '$lib/components/ui/sonner';
+	import { ModeWatcher } from 'mode-watcher';
 	import '../app.css';
 
 	let { children } = $props();
@@ -19,4 +20,5 @@
 </svelte:head>
 
 <Toaster />
+<ModeWatcher />
 {@render children?.()}
