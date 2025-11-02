@@ -175,7 +175,7 @@
 			return;
 		}
 
-		const feature = accordionRef.querySelector(`[data-id="${id}"] [data-slot="accordion-trigger"]`);
+		const feature = accordionRef.querySelector(`[data-id="${id}"]`);
 		if (!feature) {
 			return;
 		}
