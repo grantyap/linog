@@ -11,7 +11,6 @@
 	import { EarthIcon, ExternalLinkIcon, LocateIcon } from '@lucide/svelte';
 	import { tick } from 'svelte';
 	import { MapLibre, Marker } from 'svelte-maplibre';
-	import { MediaQuery } from 'svelte/reactivity';
 	import type { PageProps } from './$types';
 
 	const CENTER = [121.774, 12.8797] satisfies [number, number];
@@ -89,38 +88,28 @@
 	$effect(() => {
 		const id = setInterval(async () => {
 			isRefreshing = true;
-			const response = await fetch('/api/earthquakes', {
-				headers: {
-					'if-modified-since': lastModified ?? ''
+			try {
+				const response = await fetch('/api/earthquakes', {
+					headers: {
+						'if-modified-since': lastModified ?? ''
+					}
+				});
+
+				if (response.status === 304) {
+					return;
 				}
-			});
 
-			if (response.status === 304) {
-				isRefreshing = false;
-				return;
-			}
+				if (response.ok) {
+					const newEarthquakes = earthquakeDataSchema.parse(await response.json());
+					lastModified = response.headers.get('last-modified');
 
-			if (response.ok) {
-				const newEarthquakes = earthquakeDataSchema.parse(await response.json());
-				lastModified = response.headers.get('last-modified');
-
-				if (newEarthquakes) {
-					if (!earthquakes) {
+					if (newEarthquakes) {
 						earthquakes = newEarthquakes;
-					} else {
-						const newFeatures = newEarthquakes.features.filter(
-							(newFeature) =>
-								!earthquakes?.features.some((oldFeature) => oldFeature.id === newFeature.id)
-						);
-
-						if (newFeatures.length > 0) {
-							earthquakes.features = [...newFeatures, ...earthquakes.features];
-						}
 					}
 				}
+			} finally {
+				isRefreshing = false;
 			}
-
-			isRefreshing = false;
 		}, REFRESH_INTERVAL_MS);
 
 		return () => {
@@ -188,8 +177,6 @@
 	}
 
 	let map = $state<maplibregl.Map>();
-
-	const isDesktop = new MediaQuery('width >= 48rem');
 
 	function normalizeMagnitude(magnitude: number) {
 		return (magnitude - 1) / (9 - 1);
