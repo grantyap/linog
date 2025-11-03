@@ -2,11 +2,7 @@ import { fetchEarthquakes } from '$lib/usgs/index.server';
 import { earthquakeDataSchema } from '$lib/usgs/schema';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ setHeaders, fetch }) => {
-	// setHeaders({
-
-	// })
-
+export const load: PageServerLoad = async ({ fetch }) => {
 	return {
 		usgsPromise: fetchEarthquakes({ fetch }),
 		phivolcsPromise: fetch('/api/earthquakes/phivolcs').then((response) =>

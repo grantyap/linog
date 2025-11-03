@@ -16,7 +16,7 @@
 	import type { PageProps } from './$types';
 
 	const CENTER = [121.774, 12.8797] satisfies [number, number];
-	const REFRESH_INTERVAL_MS = 10_000;
+	const REFRESH_INTERVAL_MS = 60 * 1000;
 
 	const { data }: PageProps = $props();
 	type Feature = EarthquakeData['features'][number];
