@@ -4,13 +4,14 @@
 	import Button from '$lib/components/ui/button/button.svelte';
 	import * as Empty from '$lib/components/ui/empty';
 	import * as Select from '$lib/components/ui/select';
+	import { Skeleton } from '$lib/components/ui/skeleton';
 	import { Spinner } from '$lib/components/ui/spinner';
 	import { formatDateWithTimezone, timeAgo } from '$lib/datetime';
-	import { earthquakeDataSchema } from '$lib/usgs/schema';
+	import { earthquakeDataSchema, type EarthquakeData } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
-	import { EarthIcon, ExternalLinkIcon, LocateIcon } from '@lucide/svelte';
+	import { EarthIcon, ExternalLinkIcon, LocateIcon, SearchIcon } from '@lucide/svelte';
 	import { mode } from 'mode-watcher';
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { MapLibre, Marker } from 'svelte-maplibre';
 	import type { PageProps } from './$types';
 
@@ -18,11 +19,11 @@
 	const REFRESH_INTERVAL_MS = 10_000;
 
 	const { data }: PageProps = $props();
-	type Feature = NonNullable<(typeof data)['earthquakes']>['features'][number];
+	type Feature = EarthquakeData['features'][number];
 
 	let now = $state(new Date());
 
-	const filterOptions = [
+	const timeFilterOptions = [
 		{
 			value: 'pastHour',
 			label: 'Past hour',
@@ -60,8 +61,39 @@
 		}
 	] as const;
 
-	let filter = $state<(typeof filterOptions)[number]['value']>('past24Hours');
-	let filterTriggerContent = $derived(filterOptions.find((f) => f.value === filter)?.label ?? '');
+	// TODO: Keep this state in the URL.
+	let timeFilter = $state<(typeof timeFilterOptions)[number]['value']>('past24Hours');
+	let timeFilterTriggerContent = $derived(
+		timeFilterOptions.find((f) => f.value === timeFilter)?.label ?? ''
+	);
+
+	const magnitudeFilterOptions = [
+		{
+			value: 'all',
+			label: 'M1.0+',
+			check: (_magnitude: number) => true
+		},
+		{
+			value: 'M2.5+',
+			label: 'M2.5+',
+			check: (magnitude: number) => magnitude >= 2.5
+		},
+		{
+			value: 'M4.5+',
+			label: 'M4.5+',
+			check: (magnitude: number) => magnitude >= 4.5
+		},
+		{
+			value: 'M6.5+',
+			label: 'M6.5+',
+			check: (magnitude: number) => magnitude >= 6.5
+		}
+	] as const;
+
+	let magnitudeFilter = $state<(typeof magnitudeFilterOptions)[number]['value']>('M2.5+');
+	let magnitudeFilterTriggerContent = $derived(
+		magnitudeFilterOptions.find((option) => option.value === magnitudeFilter)?.label ?? ''
+	);
 
 	const sortOptions = [
 		{
@@ -80,58 +112,147 @@
 		}
 	] as const;
 
+	// TODO: Keep this state in the URL.
 	let sort = $state<(typeof sortOptions)[number]['value']>('newest');
 	let sortTriggerContent = $derived(sortOptions.find((f) => f.value === sort)?.label ?? '');
 
-	let earthquakes = $state(data.earthquakes);
-	let lastModified = $state(data.lastModified);
-	let isRefreshing = $state(false);
+	let usgsIsRefreshing = $state(true);
+	let phivolcsIsRefreshing = $state(true);
+	const isRefreshing = $derived(usgsIsRefreshing || phivolcsIsRefreshing);
+
+	let usgsEarthquakes = $state<EarthquakeData | null>(null);
+	let usgsLastModified = $state<string | null>(null);
+	onMount(() => {
+		data.usgsPromise
+			.then(({ data, lastModified }) => {
+				usgsEarthquakes = data;
+				usgsLastModified = lastModified;
+			})
+			.finally(() => {
+				usgsIsRefreshing = false;
+			});
+	});
+
+	let phivolcsEarthquakes = $state<EarthquakeData | null>(null);
+	let phivolcsLastModified = $state<string | null>(null);
+	onMount(() => {
+		data.phivolcsPromise
+			.then(({ data, lastModified }) => {
+				phivolcsEarthquakes = data;
+				phivolcsLastModified = lastModified;
+			})
+			.finally(() => {
+				phivolcsIsRefreshing = false;
+			});
+	});
+
+	const lastModified = $derived(
+		[usgsLastModified, phivolcsLastModified]
+			.filter((l: string | null): l is string => !!l)
+			.toSorted((a, b) => {
+				if (a < b) {
+					return -1;
+				}
+				if (a > b) {
+					return 1;
+				}
+				return 0;
+			})
+			.at(0)
+	);
+
 	$effect(() => {
+		const controller = new AbortController();
 		const id = setInterval(async () => {
-			isRefreshing = true;
-			try {
-				const response = await fetch('/api/earthquakes', {
-					headers: {
-						'if-modified-since': lastModified ?? ''
+			usgsIsRefreshing = true;
+			phivolcsIsRefreshing = true;
+
+			fetch('/api/earthquakes/usgs', {
+				headers: {
+					'if-modified-since': usgsLastModified ?? ''
+				},
+				signal: controller.signal
+			})
+				.then((response) => {
+					if (response.status === 304) {
+						return;
 					}
+
+					if (response.ok) {
+						response.json().then((data) => {
+							const newEarthquakes = earthquakeDataSchema.parse(data);
+							usgsLastModified = response.headers.get('last-modified');
+
+							if (newEarthquakes) {
+								usgsEarthquakes = newEarthquakes;
+							}
+						});
+					}
+				})
+				.catch((err) => {
+					if (!(err instanceof Error) && err.name !== 'AbortError') {
+						throw err;
+					}
+				})
+				.finally(() => {
+					usgsIsRefreshing = false;
 				});
 
-				if (response.status === 304) {
-					return;
-				}
-
-				if (response.ok) {
-					const newEarthquakes = earthquakeDataSchema.parse(await response.json());
-					lastModified = response.headers.get('last-modified');
-
-					if (newEarthquakes) {
-						earthquakes = newEarthquakes;
+			fetch('/api/earthquakes/phivolcs', {
+				headers: {
+					'if-modified-since': phivolcsLastModified ?? ''
+				},
+				signal: controller.signal
+			})
+				.then((response) => {
+					if (response.status === 304) {
+						return;
 					}
-				}
-			} finally {
-				isRefreshing = false;
-			}
+
+					if (response.ok) {
+						phivolcsLastModified = response.headers.get('last-modified');
+						response.json().then((data) => {
+							phivolcsEarthquakes = earthquakeDataSchema.parse(data);
+						});
+					}
+				})
+				.catch((err) => {
+					if (!(err instanceof Error) && err.name !== 'AbortError') {
+						throw err;
+					}
+				})
+				.finally(() => {
+					phivolcsIsRefreshing = false;
+				});
 		}, REFRESH_INTERVAL_MS);
 
 		return () => {
+			controller.abort();
 			clearInterval(id);
 		};
 	});
 
 	const filteredEarthquakes = $derived.by(() => {
-		if (!earthquakes) {
-			return [];
-		}
-
-		return earthquakes.features
+		return [...(usgsEarthquakes?.features ?? []), ...(phivolcsEarthquakes?.features ?? [])]
 			.filter((f) => {
-				if (!f.properties.place.toLowerCase().includes('philippines')) {
+				const isInPhilippines =
+					f.properties.place.toLowerCase().includes('philippines') ||
+					f.properties.sources?.includes('phivolcs');
+				if (!isInPhilippines) {
 					return false;
 				}
 
-				const option = filterOptions.find((o) => o.value === filter);
-				if (!option) return false;
-				return option.check(new Date(f.properties.time));
+				const timeFilterOption = timeFilterOptions.find((o) => o.value === timeFilter);
+				if (!timeFilterOption) return false;
+				const passesTimeFilter = timeFilterOption.check(new Date(f.properties.time));
+
+				const magnitudeFilterOption = magnitudeFilterOptions.find(
+					(o) => o.value === magnitudeFilter
+				);
+				if (!magnitudeFilterOption) return false;
+				const passesMagnitudeFilter = magnitudeFilterOption.check(f.properties.mag ?? 0);
+
+				return passesTimeFilter && passesMagnitudeFilter;
 			})
 			.toSorted((a, b) => {
 				const option = sortOptions.find((o) => o.value === sort);
@@ -139,14 +260,6 @@
 				return option.sort(a, b);
 			});
 	});
-
-	// function getMagnitudeColor(mag: number) {
-	// 	if (mag < 2) return 'bg-green-200 text-green-600 dark:bg-green-800 dark:text-green-200';
-	// 	if (mag < 4) return 'bg-yellow-200 text-yellow-600 dark:bg-yellow-800 dark:text-yellow-200';
-	// 	if (mag < 6) return 'bg-orange-200 text-orange-600 dark:bg-orange-800 dark:text-orange-200';
-	// 	if (mag < 8) return 'bg-red-200 text-red-600 dark:bg-red-800 dark:text-red-200';
-	// 	return 'bg-purple-200 text-purple-600 dark:bg-purple-800 dark:text-purple-200';
-	// }
 
 	function getMagnitudeColor(mag: number) {
 		const asClassValue = ({
@@ -160,8 +273,6 @@
 			backgroundLight: string;
 			backgroundDark: string;
 		}) => {
-			// return `--magnitude-fg-color: light-dark(var(${foregroundLight}, var(${foregroundDark}))); --magnitude-bg-color: light-dark(var(${backgroundLight}, var(${backgroundDark})));`;
-			// return `--magnitude-fg-color: var(${foregroundLight}); --magnitude-bg-color: var(${backgroundLight});`;
 			return [
 				`--magnitude-fg-color: var(${foregroundLight})`,
 				`--magnitude-fg-color-dark: var(${foregroundDark})`,
@@ -288,29 +399,53 @@
 				class="flex flex-col-reverse items-start justify-between gap-x-6 gap-y-2 @md/panel:flex-row"
 			>
 				<div class="grow">
-					<h1 class="text-xs font-medium text-muted-foreground">{earthquakes?.metadata.title}</h1>
+					<h1 class="text-xs font-medium text-muted-foreground">
+						PHIVOLCS and USGS All Earthquakes, Past Month
+					</h1>
 					<p class="text-xs text-muted-foreground">
-						Last updated {lastModified ? lastModified.toLocaleString() : now.toLocaleString()}
+						<span class="mr-1">
+							{#if lastModified}
+								Last updated {lastModified.toLocaleString()}
+							{:else}
+								Updating&hellip;
+							{/if}
+						</span>
 						{#if isRefreshing}
-							<Spinner class="ml-1 inline h-[1lh] align-text-bottom" aria-hidden="true" />
+							<Spinner class="inline h-[1lh] align-text-bottom" aria-hidden="true" />
 						{/if}
 					</p>
 				</div>
 				<img src={linogLogo} alt="Linog logo" class="h-4 shrink @md/panel:h-8 dark:invert" />
 			</div>
 			<p class="my-2 text-sm">
-				<span class="font-bold">{earthquakes?.metadata.count.toLocaleString()}</span>
+				<span class="font-bold"
+					>{(
+						(usgsEarthquakes?.metadata.count ?? 0) + (phivolcsEarthquakes?.metadata.count ?? 0)
+					).toLocaleString()}</span
+				>
 				in the past month
 			</p>
-			<div class="flex flex-col gap-2 @xs/panel:flex-row">
-				<Select.Root type="single" bind:value={filter}>
+			<div class="flex flex-col flex-wrap gap-2 @xs/panel:flex-row">
+				<Select.Root type="single" bind:value={timeFilter}>
 					<Select.Trigger
-						class={cn('w-full flex-1', !filterTriggerContent && 'text-muted-foreground')}
+						class={cn('w-full flex-1', !timeFilterTriggerContent && 'text-muted-foreground')}
 					>
-						{filterTriggerContent}
+						{timeFilterTriggerContent}
 					</Select.Trigger>
 					<Select.Content>
-						{#each filterOptions as option (option.value)}
+						{#each timeFilterOptions as option (option.value)}
+							<Select.Item value={option.value}>{option.label}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
+				<Select.Root type="single" bind:value={magnitudeFilter}>
+					<Select.Trigger
+						class={cn('w-full flex-1', !magnitudeFilterTriggerContent && 'text-muted-foreground')}
+					>
+						{magnitudeFilterTriggerContent}
+					</Select.Trigger>
+					<Select.Content>
+						{#each magnitudeFilterOptions as option (option.value)}
 							<Select.Item value={option.value}>{option.label}</Select.Item>
 						{/each}
 					</Select.Content>
@@ -329,14 +464,34 @@
 				</Select.Root>
 			</div>
 		</div>
-		{#if filteredEarthquakes.length === 0}
+		{#if (usgsEarthquakes?.features.length ?? 0) + (phivolcsEarthquakes?.features.length ?? 0) === 0}
+			{#if isRefreshing}
+				<div class="flex flex-col gap-1 overflow-y-auto px-4">
+					{#each Array(4).fill(0)}
+						<Skeleton class="h-17 w-full shrink-0" />
+					{/each}
+				</div>
+			{:else}
+				<Empty.Root class="select-none">
+					<Empty.Header>
+						<Empty.Media variant="icon">
+							<EarthIcon />
+						</Empty.Media>
+						<Empty.Title>No data</Empty.Title>
+						<Empty.Description>
+							There is no earthquake data available at this time.
+						</Empty.Description>
+					</Empty.Header>
+				</Empty.Root>
+			{/if}
+		{:else if filteredEarthquakes.length === 0}
 			<Empty.Root class="select-none">
 				<Empty.Header>
 					<Empty.Media variant="icon">
-						<EarthIcon />
+						<SearchIcon />
 					</Empty.Media>
 					<Empty.Title>No data</Empty.Title>
-					<Empty.Description>There is no earthquake data available at this time.</Empty.Description>
+					<Empty.Description>No data matches the filters.</Empty.Description>
 				</Empty.Header>
 			</Empty.Root>
 		{:else}
@@ -375,8 +530,9 @@
 								</div>
 								{#if feature.properties.mmi}
 									<div
-										class="absolute -right-2 -bottom-3.5 rounded-full border border-(--magnitude-fg-color)/25 bg-(--magnitude-bg-color) px-1 py-0.5 text-xs font-bold text-(--magnitude-fg-color) dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
+										class="absolute -right-2 -bottom-3 rounded border border-(--magnitude-fg-color)/50 bg-(--magnitude-bg-color) px-0.5 text-xs font-bold text-(--magnitude-fg-color) shadow-md dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
 										style={getMagnitudeColor(feature.properties.mmi ?? 0)}
+										aria-label="Intensity - {asIntensity(feature.properties.mmi)}"
 									>
 										{asIntensity(feature.properties.mmi)}
 									</div>
@@ -435,13 +591,23 @@
 						</Accordion.Content>
 					</Accordion.Item>
 				{/each}
+				{#if isRefreshing}
+					<div class="relative h-17 w-full shrink-0">
+						<Spinner class="absolute top-1/2 left-1/2 -translate-1/2 animate-spin" />
+					</div>
+				{/if}
 			</Accordion.Root>
 		{/if}
-		<p class="my-1 text-center text-xs text-muted-foreground">
+		<p class="mx-2 my-1 text-center text-xs text-muted-foreground">
 			<a href="https://grantyap.com" target="_blank" class="underline">
 				Grant Yap <ExternalLinkIcon class="inline-block size-3 align-baseline" aria-hidden="true" />
 			</a>
 			&middot; Data from
+			<a href="https://earthquake.phivolcs.dost.gov.ph/" target="_blank" class="underline">
+				PHIVOLCS
+				<ExternalLinkIcon class="inline-block size-3 align-baseline" aria-hidden="true" />
+			</a>
+			and
 			<a href="https://earthquake.usgs.gov/earthquakes/map/" target="_blank" class="underline">
 				U.S. Geological Survey
 				<ExternalLinkIcon class="inline-block size-3 align-baseline" aria-hidden="true" />

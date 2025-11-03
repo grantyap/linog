@@ -55,3 +55,51 @@ export function timeAgo(date: Date, now = new Date(), options?: { justNow: boole
 	const yearsAgo = Math.floor(daysAgo / 365);
 	return yearsAgo === 1 ? '1 year ago' : `${yearsAgo} years ago`;
 }
+
+export function parsePhivolcsDate(dateString: string): Date {
+	const parts = dateString.split(' - ');
+	const datePart = parts[0];
+	const timePart = parts[1];
+
+	const dateParts = datePart.split(' ');
+	const day = parseInt(dateParts[0], 10);
+	const monthName = dateParts[1];
+	const year = parseInt(dateParts[2], 10);
+
+	const timeParts = timePart.split(' ');
+	const time = timeParts[0];
+	const amPM = timeParts[1];
+
+	const timeHourMinute = time.split(':');
+	let hours = parseInt(timeHourMinute[0], 10);
+	const minutes = parseInt(timeHourMinute[1], 10);
+
+	if (amPM === 'PM' && hours < 12) {
+		hours += 12;
+	}
+	if (amPM === 'AM' && hours === 12) {
+		hours = 0;
+	}
+
+	const monthMap: { [key: string]: number } = {
+		January: 0,
+		February: 1,
+		March: 2,
+		April: 3,
+		May: 4,
+		June: 5,
+		July: 6,
+		August: 7,
+		September: 8,
+		October: 9,
+		November: 10,
+		December: 11
+	};
+
+	const month = monthMap[monthName];
+
+	const pad2Digits = (value: number) => value.toString().padStart(2, '0');
+	const localDateString = `${year}-${pad2Digits(month + 1)}-${pad2Digits(day)}T${pad2Digits(hours)}:${pad2Digits(minutes)}:00.000+08:00`;
+	const localDate = new Date(localDateString);
+	return localDate;
+}

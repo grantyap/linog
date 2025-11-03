@@ -41,6 +41,7 @@ FROM base AS release
 COPY --from=install /temp/prod/node_modules node_modules
 COPY --from=prerelease /usr/src/app/build build
 COPY --from=prerelease /usr/src/app/package.json .
+COPY ./certs/phivolcs-dost-gov-ph-chain.pem ./certs/
 
 # run the app
 USER bun
@@ -49,6 +50,8 @@ USER bun
 # secrets should be mounted here too
 # VOLUME /usr/src/db/
 # ENV DATABASE_URL=/usr/src/db/local.db
+
+ENV NODE_EXTRA_CA_CERTS=./certs/phivolcs-dost-gov-ph-chain.pem
 
 EXPOSE 3000/tcp
 CMD [ "bun", "run", "build/index.js" ]
