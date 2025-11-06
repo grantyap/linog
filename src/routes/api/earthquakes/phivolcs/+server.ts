@@ -21,7 +21,8 @@ const MONTHS = [
 	'December'
 ];
 
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes - try to refresh
+const CACHE_MAX_AGE = 72 * 60 * 60 * 1000; // 72 hours - serve stale if needed
 
 interface CacheEntry {
 	data: EarthquakeData | null;
@@ -34,12 +35,12 @@ const cache = {
 	lastMonth: { data: null, lastModified: null, timestamp: 0 } as CacheEntry
 };
 
-function isCacheValid(entry: CacheEntry): boolean {
+function isCacheFresh(entry: CacheEntry): boolean {
 	return !!(entry.data && entry.timestamp && Date.now() - entry.timestamp < CACHE_TTL);
 }
 
-function isCacheFresh(entry: CacheEntry): boolean {
-	return !!(entry.data && entry.lastModified);
+function isCacheUsable(entry: CacheEntry): boolean {
+	return !!(entry.data && entry.timestamp && Date.now() - entry.timestamp < CACHE_MAX_AGE);
 }
 
 export const GET: RequestHandler = async ({ request, fetch }) => {
@@ -58,32 +59,60 @@ export const GET: RequestHandler = async ({ request, fetch }) => {
 		return `${PHIVOLCS_BASE_URL}/EQLatest-Monthly/${year}/${year}_${MONTHS[month - 1]}.html`;
 	})();
 
-	// Fetch both sources concurrently
-	const [currentMonthResult, lastMonthResult] = await Promise.allSettled([
-		fetchMonthData(currentMonthURL, cache.currentMonth, fetch, request.signal),
-		fetchMonthData(lastMonthURL, cache.lastMonth, fetch, request.signal)
-	]);
+	// Only fetch if cache is stale (older than CACHE_TTL)
+	// This implements "stale-while-revalidate" pattern
+	const shouldFetchCurrent = !isCacheFresh(cache.currentMonth);
+	const shouldFetchLast = !isCacheFresh(cache.lastMonth);
 
-	// Update cache for current month
-	if (currentMonthResult.status === 'fulfilled' && currentMonthResult.value) {
-		cache.currentMonth = currentMonthResult.value;
-	} else if (currentMonthResult.status === 'rejected') {
-		console.error('Error fetching current month:', currentMonthResult.reason);
+	// Fetch both sources concurrently if needed
+	if (shouldFetchCurrent || shouldFetchLast) {
+		const fetchPromises: Promise<CacheEntry | null>[] = [];
+
+		if (shouldFetchCurrent) {
+			fetchPromises.push(
+				fetchMonthData(currentMonthURL, cache.currentMonth, fetch, request.signal)
+					.then((result) => {
+						if (result) cache.currentMonth = result;
+						return result;
+					})
+					.catch((err) => {
+						console.error('Error fetching current month:', err);
+						return null;
+					})
+			);
+		}
+
+		if (shouldFetchLast) {
+			fetchPromises.push(
+				fetchMonthData(lastMonthURL, cache.lastMonth, fetch, request.signal)
+					.then((result) => {
+						if (result) cache.lastMonth = result;
+						return result;
+					})
+					.catch((err) => {
+						console.error('Error fetching last month:', err);
+						return null;
+					})
+			);
+		}
+
+		// Wait for fetches to complete, but don't block on them
+		await Promise.allSettled(fetchPromises);
 	}
 
-	// Update cache for last month
-	if (lastMonthResult.status === 'fulfilled' && lastMonthResult.value) {
-		cache.lastMonth = lastMonthResult.value;
-	} else if (lastMonthResult.status === 'rejected') {
-		console.error('Error fetching last month:', lastMonthResult.reason);
-	}
-
-	// Get the best available data (prefer fresh, fall back to stale cache)
+	// Get the best available data (prefer fresh, fall back to stale but usable cache)
 	const currentMonthData = cache.currentMonth.data;
 	const lastMonthData = cache.lastMonth.data;
 
+	// Check if we have usable data (within MAX_AGE, even if stale)
+	if (!isCacheUsable(cache.currentMonth) || !isCacheUsable(cache.lastMonth)) {
+		console.error('PHIVOLCS: No usable data available (cache too old or empty)');
+		error(503, 'Earthquake data temporarily unavailable');
+	}
+
 	if (!currentMonthData || !lastMonthData) {
-		console.error('PHIVOLCS: No data available (fresh or cached)');
+		// This shouldn't happen if isCacheUsable passed, but safety check
+		console.error('PHIVOLCS: Cache data is null despite passing usability check');
 		error(503, 'Earthquake data temporarily unavailable');
 	}
 
@@ -120,10 +149,21 @@ export const GET: RequestHandler = async ({ request, fetch }) => {
 		features: [...lastMonthData.features, ...currentMonthData.features]
 	};
 
+	// Determine cache freshness for client
+	const isDataStale = !isCacheFresh(cache.currentMonth) || !isCacheFresh(cache.lastMonth);
+	const cacheAge = Math.min(
+		Date.now() - cache.currentMonth.timestamp,
+		Date.now() - cache.lastMonth.timestamp
+	);
+
 	return json(combinedData, {
 		headers: {
 			'last-modified': newestLastModified ?? new Date().toUTCString(),
-			'cache-control': 'public, max-age=300' // 5 minutes
+			'cache-control': isDataStale
+				? 'public, max-age=60, stale-while-revalidate=3600' // Stale data: short client cache
+				: 'public, max-age=300', // Fresh data: normal client cache
+			'x-cache-age': Math.floor(cacheAge / 1000).toString(), // Age in seconds for debugging
+			'x-cache-status': isDataStale ? 'STALE' : 'FRESH'
 		}
 	});
 };
@@ -134,15 +174,15 @@ async function fetchMonthData(
 	fetch: typeof globalThis.fetch,
 	signal: AbortSignal
 ): Promise<CacheEntry | null> {
-	// If cache is still valid (within TTL), don't fetch
-	if (isCacheValid(cacheEntry)) {
+	// If cache is still fresh (within TTL), don't fetch
+	if (isCacheFresh(cacheEntry)) {
 		return null; // null means "use existing cache"
 	}
 
 	// Build headers with conditional request if we have cached data
 	const headers: Record<string, string> = {};
-	if (isCacheFresh(cacheEntry)) {
-		headers['if-modified-since'] = cacheEntry.lastModified!;
+	if (cacheEntry.data && cacheEntry.lastModified) {
+		headers['if-modified-since'] = cacheEntry.lastModified;
 	}
 
 	try {
