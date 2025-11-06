@@ -271,7 +271,12 @@ async function getPhivolcsItemsFromMonthPage(html: string, { fetch = globalThis.
 		);
 	});
 
-	return (await Promise.all(rowPromises)).filter((item) => item.href);
+	const items = (await Promise.all(rowPromises)).filter((item) => item.href);
+	const uniqueItems = items.filter(
+		(item, index, self) => index === self.findIndex((t) => t.href === item.href)
+	);
+
+	return uniqueItems;
 }
 
 async function getIntensityFromDetailPage(url: string, { fetch = globalThis.fetch }) {
