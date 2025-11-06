@@ -21,23 +21,35 @@ const MONTHS = [
 	'December'
 ];
 
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+interface CacheEntry {
+	data: EarthquakeData | null;
+	lastModified: string | null;
+	timestamp: number;
+}
+
 const cache = {
-	currentMonthData: null as EarthquakeData | null,
-	currentMonthLastModified: null as string | null,
-	lastMonthData: null as EarthquakeData | null,
-	lastMonthLastModified: null as string | null
+	currentMonth: { data: null, lastModified: null, timestamp: 0 } as CacheEntry,
+	lastMonth: { data: null, lastModified: null, timestamp: 0 } as CacheEntry
 };
+
+function isCacheValid(entry: CacheEntry): boolean {
+	return !!(entry.data && entry.timestamp && Date.now() - entry.timestamp < CACHE_TTL);
+}
+
+function isCacheFresh(entry: CacheEntry): boolean {
+	return !!(entry.data && entry.lastModified);
+}
 
 export const GET: RequestHandler = async ({ request, fetch }) => {
 	const currentMonthURL = PHIVOLCS_BASE_URL;
 	const lastMonthURL = (() => {
-		const now = new Date();
-
-		let year = now.getFullYear();
-		let month = now.getMonth() + 1;
+		const date = new Date();
+		let year = date.getFullYear();
+		let month = date.getMonth() + 1;
 
 		month -= 1;
-		// Handle underflow.
 		if (month < 1) {
 			month = 12;
 			year -= 1;
@@ -46,124 +58,141 @@ export const GET: RequestHandler = async ({ request, fetch }) => {
 		return `${PHIVOLCS_BASE_URL}/EQLatest-Monthly/${year}/${year}_${MONTHS[month - 1]}.html`;
 	})();
 
-	const headers: Record<string, string> = {};
-	const ifModifiedSince = request.headers.get('if-modified-since');
-	const didCache = cache.currentMonthData || cache.lastMonthData;
-	if (ifModifiedSince && didCache) {
-		headers['if-modified-since'] = ifModifiedSince;
-	}
-
-	let [currentMonthData, lastMonthData] = await Promise.all([
-		fetch(currentMonthURL, { headers, signal: request.signal }).then(async (response) => {
-			if (response.status === 304) {
-				return null;
-			}
-
-			if (!response.ok) {
-				// No-op.
-				console.error(
-					`Error fetching earthquakes from this month: ${response.status} ${response.statusText}`
-				);
-				return null;
-			}
-
-			const items = await getPhivolcsItemsFromMonthPage(await response.text(), {
-				fetch,
-				ifModifiedSince: ifModifiedSince ?? ''
-			});
-
-			cache.currentMonthLastModified = response.headers.get('last-modified');
-			cache.currentMonthData = phivolcsListToEarthquakeData(items);
-
-			return phivolcsListToEarthquakeData(items);
-		}),
-		fetch(lastMonthURL, { headers, signal: request.signal }).then(async (response) => {
-			if (response.status === 304) {
-				return null;
-			}
-
-			if (!response.ok) {
-				// No-op.
-				console.error(
-					`Error fetching earthquakes from previous month: ${response.status} ${response.statusText}`
-				);
-				return null;
-			}
-
-			const items = await getPhivolcsItemsFromMonthPage(await response.text(), {
-				fetch,
-				ifModifiedSince: ifModifiedSince ?? ''
-			});
-
-			cache.lastMonthLastModified = response.headers.get('last-modified');
-			cache.lastMonthData = phivolcsListToEarthquakeData(items);
-
-			return phivolcsListToEarthquakeData(items);
-		})
+	// Fetch both sources concurrently
+	const [currentMonthResult, lastMonthResult] = await Promise.allSettled([
+		fetchMonthData(currentMonthURL, cache.currentMonth, fetch, request.signal),
+		fetchMonthData(lastMonthURL, cache.lastMonth, fetch, request.signal)
 	]);
 
-	currentMonthData ??= cache.currentMonthData;
-	lastMonthData ??= cache.lastMonthData;
-
-	if (!currentMonthData || !lastMonthData) {
-		console.error("PHIVOLCS cache empty, couldn't complete request");
-
-		cache.currentMonthData = null;
-		cache.lastMonthData = null;
-		cache.currentMonthLastModified = null;
-		cache.lastMonthLastModified = null;
-		error(500);
+	// Update cache for current month
+	if (currentMonthResult.status === 'fulfilled' && currentMonthResult.value) {
+		cache.currentMonth = currentMonthResult.value;
+	} else if (currentMonthResult.status === 'rejected') {
+		console.error('Error fetching current month:', currentMonthResult.reason);
 	}
 
-	const newestLastModified = (() => {
-		const currentMonthLastModified = cache.currentMonthLastModified
-			? new Date(cache.currentMonthLastModified)
-			: null;
-		const lastMonthLastModified = cache.lastMonthLastModified
-			? new Date(cache.lastMonthLastModified)
-			: null;
+	// Update cache for last month
+	if (lastMonthResult.status === 'fulfilled' && lastMonthResult.value) {
+		cache.lastMonth = lastMonthResult.value;
+	} else if (lastMonthResult.status === 'rejected') {
+		console.error('Error fetching last month:', lastMonthResult.reason);
+	}
 
-		if (!currentMonthLastModified) return lastMonthLastModified;
-		if (!lastMonthLastModified) return currentMonthLastModified;
-		return currentMonthLastModified > lastMonthLastModified
-			? currentMonthLastModified
-			: lastMonthLastModified;
-	})();
+	// Get the best available data (prefer fresh, fall back to stale cache)
+	const currentMonthData = cache.currentMonth.data;
+	const lastMonthData = cache.lastMonth.data;
 
+	if (!currentMonthData || !lastMonthData) {
+		console.error('PHIVOLCS: No data available (fresh or cached)');
+		error(503, 'Earthquake data temporarily unavailable');
+	}
+
+	// Determine the newest last-modified date for response headers
+	const newestLastModified = getNewestLastModified(
+		cache.currentMonth.lastModified,
+		cache.lastMonth.lastModified
+	);
+
+	// Check if client cache is still valid
+	const ifModifiedSince = request.headers.get('if-modified-since');
 	if (ifModifiedSince && newestLastModified) {
 		const clientDate = new Date(ifModifiedSince);
-		if (clientDate >= newestLastModified) {
-			console.log(clientDate, 'Cache hit');
+		const serverDate = new Date(newestLastModified);
+
+		if (clientDate >= serverDate) {
 			return new Response(null, {
 				status: 304,
 				headers: {
-					'last-modified': newestLastModified.toUTCString() ?? ''
+					'last-modified': newestLastModified,
+					'cache-control': 'public, max-age=300' // 5 minutes
 				}
 			});
 		}
 	}
 
-	return json(
-		{
-			...currentMonthData,
-			metadata: {
-				...currentMonthData.metadata,
-				count: currentMonthData.metadata.count + lastMonthData.metadata.count
-			},
-			features: [...(lastMonthData?.features ?? []), ...(currentMonthData?.features ?? [])]
-		} satisfies EarthquakeData,
-		{
-			headers: {
-				'last-modified': newestLastModified?.toUTCString() ?? ''
-			}
+	// Combine and return data
+	const combinedData: EarthquakeData = {
+		...currentMonthData,
+		metadata: {
+			...currentMonthData.metadata,
+			count: currentMonthData.metadata.count + lastMonthData.metadata.count
+		},
+		features: [...lastMonthData.features, ...currentMonthData.features]
+	};
+
+	return json(combinedData, {
+		headers: {
+			'last-modified': newestLastModified ?? new Date().toUTCString(),
+			'cache-control': 'public, max-age=300' // 5 minutes
 		}
-	);
+	});
 };
 
-async function getPhivolcsItemsFromMonthPage(
-	html: string,
-	{ fetch = globalThis.fetch, ifModifiedSince = '' }
-) {
+async function fetchMonthData(
+	url: string,
+	cacheEntry: CacheEntry,
+	fetch: typeof globalThis.fetch,
+	signal: AbortSignal
+): Promise<CacheEntry | null> {
+	// If cache is still valid (within TTL), don't fetch
+	if (isCacheValid(cacheEntry)) {
+		return null; // null means "use existing cache"
+	}
+
+	// Build headers with conditional request if we have cached data
+	const headers: Record<string, string> = {};
+	if (isCacheFresh(cacheEntry)) {
+		headers['if-modified-since'] = cacheEntry.lastModified!;
+	}
+
+	try {
+		const response = await fetch(url, { headers, signal });
+
+		// 304: Server says our cache is still fresh
+		if (response.status === 304) {
+			return {
+				...cacheEntry,
+				timestamp: Date.now() // Refresh TTL
+			};
+		}
+
+		if (!response.ok) {
+			console.error(`HTTP ${response.status} from ${url}`);
+			// Return null to keep using existing cache
+			return null;
+		}
+
+		// Parse and cache new data
+		const html = await response.text();
+		const items = await getPhivolcsItemsFromMonthPage(html, { fetch });
+		const data = phivolcsListToEarthquakeData(items);
+
+		return {
+			data,
+			lastModified: response.headers.get('last-modified'),
+			timestamp: Date.now()
+		};
+	} catch (err) {
+		console.error(`Error fetching ${url}:`, err);
+		// Return null to keep using existing cache
+		return null;
+	}
+}
+
+function getNewestLastModified(...dates: (string | null)[]): string | null {
+	const validDates = dates
+		.filter((d): d is string => d !== null)
+		.map((d) => new Date(d))
+		.filter((d) => !isNaN(d.getTime()));
+
+	if (validDates.length === 0) return null;
+
+	const newest = validDates.reduce((max, current) => (current > max ? current : max));
+
+	return newest.toUTCString();
+}
+
+async function getPhivolcsItemsFromMonthPage(html: string, { fetch = globalThis.fetch }) {
 	const $ = cheerio.load(html);
 	const table = $(`table:has(tbody > tr > td a[href*="Earthquake_Information"])`);
 	const rows = $(table).find('tbody > tr');
@@ -178,76 +207,50 @@ async function getPhivolcsItemsFromMonthPage(
 
 					const href = (() => {
 						let href = aEl.attr('href');
-						if (typeof href === 'undefined') {
-							return '';
-						}
-						if (!href) {
+						if (typeof href === 'undefined' || !href) {
 							return '';
 						}
 
-						// Use forward slashes instead.
+						// Use forward slashes instead
 						href = href.replace(/\\/g, '/');
-						// Remove the leading '/'.
-						if (href.at(0) === '/') {
-							href = href.slice('/'.length);
+						// Remove leading '/'
+						if (href.startsWith('/')) {
+							href = href.slice(1);
 						}
 
 						return new URL(href, PHIVOLCS_BASE_URL).toString();
 					})();
+
 					const date = parsePhivolcsDate(aEl.text().trim());
+
 					const intensity = await (async () => {
 						// There is a recorded intensity if the link is blue.
-						// The `<a>` element is blue by default, but if there's
-						// a `<span>` inside, then it is pink.
-						//
-						// In other words, if there is a `<span>` inside, then
-						// the item does not have a recorded intensity.
+						// The <a> element is blue by default, but if there's
+						// a <span> inside, then it is pink (no intensity).
 						if (aEl.find('span').length > 0) {
 							return null;
 						}
 
 						try {
-							return await getIntensityFromDetailPage(href, {
-								fetch,
-								ifModifiedSince: ifModifiedSince ?? undefined
-							});
+							return await getIntensityFromDetailPage(href, { fetch });
 						} catch (err) {
-							console.error(`Error getting intensity for ${href}`);
+							console.error(`Error getting intensity for ${href}:`, err);
 							return null;
 						}
 					})();
 
-					return {
-						href,
-						date,
-						intensity
-					};
+					return { href, date, intensity };
 				}
-				case 1: {
-					return {
-						latitudeN: Number.parseFloat($(cell).text().trim())
-					};
-				}
-				case 2: {
-					return {
-						longitudeE: Number.parseFloat($(cell).text().trim())
-					};
-				}
-				case 3: {
-					return {
-						depthKm: Number.parseFloat($(cell).text().trim())
-					};
-				}
-				case 4: {
-					return {
-						magnitude: Number.parseFloat($(cell).text().trim())
-					};
-				}
-				case 5: {
-					return {
-						location: $(cell).text().replace(/\s+/g, ' ').trim()
-					};
-				}
+				case 1:
+					return { latitudeN: Number.parseFloat($(cell).text().trim()) };
+				case 2:
+					return { longitudeE: Number.parseFloat($(cell).text().trim()) };
+				case 3:
+					return { depthKm: Number.parseFloat($(cell).text().trim()) };
+				case 4:
+					return { magnitude: Number.parseFloat($(cell).text().trim()) };
+				case 5:
+					return { location: $(cell).text().replace(/\s+/g, ' ').trim() };
 				default:
 					return {};
 			}
@@ -271,22 +274,11 @@ async function getPhivolcsItemsFromMonthPage(
 	return (await Promise.all(rowPromises)).filter((item) => item.href);
 }
 
-async function getIntensityFromDetailPage(
-	url: string,
-	{ fetch = globalThis.fetch, ifModifiedSince = '' }
-) {
-	const response = await fetch(url, {
-		headers: {
-			'if-modified-since': ifModifiedSince
-		}
-	});
-
-	if (response.status === 304) {
-		return null;
-	}
+async function getIntensityFromDetailPage(url: string, { fetch = globalThis.fetch }) {
+	const response = await fetch(url);
 
 	if (!response.ok) {
-		error(response.status, await response.text());
+		throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 	}
 
 	const body = await response.text();
@@ -299,8 +291,7 @@ async function getIntensityFromDetailPage(
 			const $el = $(el);
 			const elText = $el.text().trim().replace(/\s+/g, ' ');
 
-			const isReportedIntensities = elText.toLowerCase().includes('reported intensities');
-			if (!isReportedIntensities) {
+			if (!elText.toLowerCase().includes('reported intensities')) {
 				return null;
 			}
 
@@ -311,45 +302,37 @@ async function getIntensityFromDetailPage(
 			}
 
 			const highestIntensity = partsList
-				.map(([_matched, captured]) => {
-					return intensityDisplayToValue(captured);
-				})
+				.map(([_matched, captured]) => intensityDisplayToValue(captured))
 				.toArray()
-				.toSorted((a, b) => {
-					return b - a;
-				})
+				.toSorted((a, b) => b - a)
 				.at(0);
 
 			return highestIntensity;
 		})
 		.get()
 		.at(0);
+
 	return reportedIntensities ?? null;
 }
 
-function intensityDisplayToValue(intensity: string) {
-	switch (intensity.toLowerCase()) {
-		case 'i':
-			return 1;
-		case 'ii':
-			return 2;
-		case 'iii':
-			return 3;
-		case 'iv':
-			return 4;
-		case 'v':
-			return 5;
-		case 'vi':
-			return 6;
-		case 'vii':
-			return 7;
-		case 'viii':
-			return 8;
-		case 'ix':
-			return 9;
-		case 'x':
-			return 10;
-		default:
-			throw new Error('Invalid intensity');
+function intensityDisplayToValue(intensity: string): number {
+	const intensityMap: Record<string, number> = {
+		i: 1,
+		ii: 2,
+		iii: 3,
+		iv: 4,
+		v: 5,
+		vi: 6,
+		vii: 7,
+		viii: 8,
+		ix: 9,
+		x: 10
+	};
+
+	const value = intensityMap[intensity.toLowerCase()];
+	if (value === undefined) {
+		throw new Error(`Invalid intensity: ${intensity}`);
 	}
+
+	return value;
 }
