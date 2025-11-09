@@ -49,7 +49,7 @@ export function phivolcsListToEarthquakeData(items: PhivolcsListItem[]): Earthqu
 					net: null,
 					code: null,
 					ids: null,
-					sources: ",phivolcs,",
+					sources: ',phivolcs,',
 					types: null,
 					nst: null,
 					dmin: null,

@@ -261,7 +261,7 @@
 				return option.sort(a, b);
 			})
 			.map((f) => {
-				const selected = selectedFeature === f.id;
+				const selected = selectedFeature === f.properties.url;
 				const normalizedMagnitude = normalizeMagnitude(f.properties.mag ?? 0);
 				return {
 					...f,
@@ -370,6 +370,7 @@
 		return 'I';
 	}
 
+	// TODO: Investigate why this causes jank every 1,000 ms.
 	$effect(() => {
 		const id = setInterval(() => {
 			now = new Date();
@@ -403,11 +404,38 @@
 		return (magnitude - 1) / (9 - 1);
 	}
 
-	const styles = {
-		get current() {
-			return getComputedStyle(document.documentElement);
-		}
-	};
+	const colors = (() => {
+		// Cache colors to avoid asking the document for them every time.
+		let unselectedColor: Oklch | null = null;
+		let selectedColor: Oklch | null = null;
+
+		const getAndParseColor = (cssVariable: string) => {
+			const styles = getComputedStyle(document.documentElement);
+			const colorString = styles.getPropertyValue(cssVariable);
+			const color = parse(colorString);
+
+			const isOklch = (color: Color): color is Oklch => {
+				return color.mode === 'oklch';
+			};
+
+			if (!color || !isOklch(color)) {
+				throw new Error(`Error parsing color: ${colorString}`);
+			}
+
+			return color;
+		};
+
+		return {
+			get unselectedColor() {
+				unselectedColor ??= getAndParseColor('--color-orange-500');
+				return unselectedColor;
+			},
+			get selectedColor() {
+				selectedColor ??= getAndParseColor('--color-blue-500');
+				return selectedColor;
+			}
+		};
+	})();
 
 	function calculateColorForFeature(feature: Feature, selected: boolean) {
 		const normalizedMagnitude = normalizeMagnitude(feature.properties.mag ?? 0);
@@ -416,34 +444,21 @@
 		const invertedLightness =
 			(maxLightness - minLightness) * (1 - normalizedMagnitude + minLightness);
 
-		const isOklch = (color: Color): color is Oklch => {
-			return color.mode === 'oklch';
-		};
-
-		const unselectedColorString = styles.current.getPropertyValue('--color-orange-500');
-		const unselectedColor = parse(unselectedColorString);
-		if (!unselectedColor || !isOklch(unselectedColor)) {
-			throw new Error(`Error parsing color: ${unselectedColorString}`);
-		}
-
-		const selectedColorString = styles.current.getPropertyValue('--color-blue-500');
-		const selectedColor = parse(selectedColorString);
-		if (!selectedColor || !isOklch(selectedColor)) {
-			throw new Error(`Error parsing color: ${selectedColorString}`);
-		}
-
 		const color = selected
-			? selectedColor
+			? colors.selectedColor
 			: oklch({
 					mode: 'oklch',
 					l: invertedLightness,
-					c: unselectedColor?.c ?? 0,
-					h: unselectedColor?.h ?? 0
+					c: colors.unselectedColor?.c ?? 0,
+					h: colors.unselectedColor?.h ?? 0
 				});
 		const colorHex = formatHex(color);
 
 		return colorHex;
 	}
+
+	const clientDateFormatter = new Intl.DateTimeFormat();
+	const localDateFormatter = new Intl.DateTimeFormat(undefined, { timeZone: 'Asia/Manila' });
 
 	let map = $state<maplibregl.Map>();
 </script>
@@ -465,7 +480,7 @@
 					<p class="text-xs text-muted-foreground">
 						<span class="mr-1">
 							{#if lastModified}
-								Last updated {lastModified.toLocaleString()}
+								Last updated {clientDateFormatter.format(new Date(lastModified))}
 							{:else}
 								Updating&hellip;
 							{/if}
@@ -478,11 +493,11 @@
 				<img src={linogLogo} alt="Linog logo" class="h-4 shrink @md/panel:h-8 dark:invert" />
 			</div>
 			<p class="my-2 text-sm">
-				<span class="font-bold"
-					>{(
+				<span class="font-bold">
+					{(
 						(usgsEarthquakes?.metadata.count ?? 0) + (phivolcsEarthquakes?.metadata.count ?? 0)
-					).toLocaleString()}</span
-				>
+					).toLocaleString()}
+				</span>
 				in the past month
 			</p>
 			<div class="flex flex-col flex-wrap gap-2 @xs/panel:flex-row">
@@ -564,7 +579,7 @@
 						return;
 					}
 
-					const feature = filteredEarthquakes.find((f) => f.id === e);
+					const feature = filteredEarthquakes.find((f) => f.properties.url === e);
 					if (!feature) {
 						return;
 					}
@@ -576,9 +591,9 @@
 				}}
 				class="flex-1 overflow-auto px-4 pb-4 [&>li]:not-first:mt-2"
 			>
-				{#each filteredEarthquakes as feature (feature.id)}
+				{#each filteredEarthquakes as feature (feature.properties.url)}
 					{@const time = new Date(feature.properties.time)}
-					<Accordion.Item value={feature.id} data-id={feature.id}>
+					<Accordion.Item value={feature.properties.url} data-id={feature.properties.url}>
 						<Accordion.Trigger class="group flex items-center gap-4 !no-underline">
 							<div class="relative">
 								<div
@@ -603,7 +618,7 @@
 									{feature.properties.place}
 								</div>
 								<div class="text-xs font-normal text-muted-foreground">
-									{formatDateWithTimezone(time)}
+									{formatDateWithTimezone(time, clientDateFormatter)}
 								</div>
 							</div>
 						</Accordion.Trigger>
@@ -614,7 +629,7 @@
 								<dt>Local time</dt>
 								<dd>
 									<div>
-										{time.toLocaleString(undefined, { timeZone: 'Asia/Manila' })} (UTC+08:00)
+										{localDateFormatter.format(time)} (UTC+08:00)
 									</div>
 									<div>
 										{timeAgo(time, now)}
@@ -693,8 +708,14 @@
 						'circle-opacity': 0.8
 					}}
 					onclick={async (e) => {
-						const id: string | null | undefined = e.features?.[0]?.properties?.url;
+						let id = e.features[0].properties?.url;
 						if (!id) {
+							return;
+						}
+						if (typeof id === 'number') {
+							id = id.toString();
+						}
+						if (typeof id !== 'string') {
 							return;
 						}
 

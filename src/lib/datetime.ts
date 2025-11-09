@@ -1,11 +1,10 @@
-export function formatDateWithTimezone(
-	date: Date,
-	options?: {
-		locales?: Parameters<Date['toLocaleString']>[0];
-		options?: Parameters<Date['toLocaleString']>[1];
-	}
-) {
-	const localeString = date.toLocaleString(options?.locales, options?.options);
+/**
+ * Provide a {@link format} to improve performance.
+ */
+export function formatDateWithTimezone(date: Date, format?: Intl.DateTimeFormat) {
+	format ??= new Intl.DateTimeFormat();
+
+	const localeString = format.format(date);
 	const offset = -date.getTimezoneOffset(); // Negative because getTimezoneOffset returns opposite sign
 	const hours = Math.floor(Math.abs(offset) / 60);
 	const minutes = Math.abs(offset) % 60;
