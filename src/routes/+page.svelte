@@ -10,9 +10,10 @@
 	import { earthquakeDataSchema, type EarthquakeData } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
 	import { EarthIcon, ExternalLinkIcon, LocateIcon, SearchIcon } from '@lucide/svelte';
+	import { formatHex, oklch, parse, type Color, type Oklch } from 'culori';
 	import { mode } from 'mode-watcher';
 	import { onMount, tick } from 'svelte';
-	import { MapLibre, Marker } from 'svelte-maplibre';
+	import { CircleLayer, GeoJSON, MapLibre } from 'svelte-maplibre';
 	import type { PageProps } from './$types';
 
 	const CENTER = [121.774, 12.8797] satisfies [number, number];
@@ -258,7 +259,24 @@
 				const option = sortOptions.find((o) => o.value === sort);
 				if (!option) return 0;
 				return option.sort(a, b);
+			})
+			.map((f) => {
+				const selected = selectedFeature === f.id;
+				const normalizedMagnitude = normalizeMagnitude(f.properties.mag ?? 0);
+				return {
+					...f,
+					properties: {
+						...f.properties,
+						selected,
+						normalizedMagnitude,
+						color: calculateColorForFeature(f, selected)
+					}
+				};
 			});
+	});
+	const filteredFeatureCollection: GeoJSON.FeatureCollection = $derived({
+		type: 'FeatureCollection',
+		features: filteredEarthquakes
 	});
 
 	function getMagnitudeColor(mag: number) {
@@ -381,11 +399,53 @@
 		});
 	}
 
-	let map = $state<maplibregl.Map>();
-
 	function normalizeMagnitude(magnitude: number) {
 		return (magnitude - 1) / (9 - 1);
 	}
+
+	const styles = {
+		get current() {
+			return getComputedStyle(document.documentElement);
+		}
+	};
+
+	function calculateColorForFeature(feature: Feature, selected: boolean) {
+		const normalizedMagnitude = normalizeMagnitude(feature.properties.mag ?? 0);
+		const maxLightness = 1.5;
+		const minLightness = 0;
+		const invertedLightness =
+			(maxLightness - minLightness) * (1 - normalizedMagnitude + minLightness);
+
+		const isOklch = (color: Color): color is Oklch => {
+			return color.mode === 'oklch';
+		};
+
+		const unselectedColorString = styles.current.getPropertyValue('--color-orange-500');
+		const unselectedColor = parse(unselectedColorString);
+		if (!unselectedColor || !isOklch(unselectedColor)) {
+			throw new Error(`Error parsing color: ${unselectedColorString}`);
+		}
+
+		const selectedColorString = styles.current.getPropertyValue('--color-blue-500');
+		const selectedColor = parse(selectedColorString);
+		if (!selectedColor || !isOklch(selectedColor)) {
+			throw new Error(`Error parsing color: ${selectedColorString}`);
+		}
+
+		const color = selected
+			? selectedColor
+			: oklch({
+					mode: 'oklch',
+					l: invertedLightness,
+					c: unselectedColor?.c ?? 0,
+					h: unselectedColor?.h ?? 0
+				});
+		const colorHex = formatHex(color);
+
+		return colorHex;
+	}
+
+	let map = $state<maplibregl.Map>();
 </script>
 
 <svelte:head>
@@ -625,35 +685,24 @@
 				? 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
 				: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'}
 		>
-			{#each filteredEarthquakes as feature (feature.id)}
-				{@const lngLat = [
-					feature.geometry.coordinates[0],
-					feature.geometry.coordinates[1]
-				] satisfies [number, number]}
-				{@const normalizedMagnitude = normalizeMagnitude(feature.properties.mag ?? 0)}
-				<Marker
-					{lngLat}
-					onclick={async () => {
-						await scrollToFeature(feature.id);
-						selectedFeature = feature.id;
+			<GeoJSON data={filteredFeatureCollection}>
+				<CircleLayer
+					paint={{
+						'circle-color': ['get', 'color'],
+						'circle-radius': ['*', ['get', 'normalizedMagnitude'], 20],
+						'circle-opacity': 0.8
 					}}
-				>
-					<div
-						style={[
-							`--magnitude: ${feature.properties.mag}`,
-							`--normalized-magnitude: ${normalizedMagnitude}`,
-							`--lightness: calc((var(--max-lightness) - var(--min-lightness)) * var(--normalized-magnitude) + var(--min-lightness))`,
-							`--inverted-lightness: calc((var(--max-lightness) - var(--min-lightness)) * (1 - var(--normalized-magnitude)) + var(--min-lightness))`,
-							`--color: oklch(from var(--color-orange-500) var(--inverted-lightness) c h)`,
-							`--size: calc(var(--normalized-magnitude) * var(--spacing) * 10)`
-						].join('; ')}
-						class={cn(
-							'size-(--size) rounded-full bg-(--color) opacity-80',
-							selectedFeature === feature.id && 'bg-blue-500 opacity-100'
-						)}
-					></div>
-				</Marker>
-			{/each}
+					onclick={async (e) => {
+						const id: string | null | undefined = e.features?.[0]?.properties?.url;
+						if (!id) {
+							return;
+						}
+
+						await scrollToFeature(id);
+						selectedFeature = id;
+					}}
+				/>
+			</GeoJSON>
 		</MapLibre>
 	</div>
 </div>
