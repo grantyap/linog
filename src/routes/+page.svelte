@@ -9,6 +9,7 @@
 	import { formatDateWithTimezone, timeAgo } from '$lib/datetime';
 	import { earthquakeDataSchema, type EarthquakeData } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
+	import SvelteVirtualList from '@humanspeak/svelte-virtual-list';
 	import { EarthIcon, ExternalLinkIcon, LocateIcon, SearchIcon } from '@lucide/svelte';
 	import { formatHex, oklch, parse, type Color, type Oklch } from 'culori';
 	import { mode } from 'mode-watcher';
@@ -18,6 +19,7 @@
 
 	const CENTER = [121.774, 12.8797] satisfies [number, number];
 	const REFRESH_INTERVAL_MS = 60 * 1000;
+	const IS_REFRESHING_KEY = '_refreshing';
 
 	const { data }: PageProps = $props();
 	type Feature = EarthquakeData['features'][number];
@@ -119,7 +121,7 @@
 
 	let usgsIsRefreshing = $state(true);
 	let phivolcsIsRefreshing = $state(true);
-	const isRefreshing = $derived(usgsIsRefreshing || phivolcsIsRefreshing);
+	const isRefreshing = $derived(usgsIsRefreshing || phivolcsIsRefreshing || true);
 
 	let usgsEarthquakes = $state<EarthquakeData | null>(null);
 	let usgsLastModified = $state<string | null>(null);
@@ -165,6 +167,7 @@
 	$effect(() => {
 		const controller = new AbortController();
 		const id = setInterval(async () => {
+			now = new Date();
 			usgsIsRefreshing = true;
 			phivolcsIsRefreshing = true;
 
@@ -233,8 +236,8 @@
 		};
 	});
 
-	const filteredEarthquakes = $derived.by(() => {
-		return [...(usgsEarthquakes?.features ?? []), ...(phivolcsEarthquakes?.features ?? [])]
+	const filteredEarthquakes = $derived(
+		[...(usgsEarthquakes?.features ?? []), ...(phivolcsEarthquakes?.features ?? [])]
 			.filter((f) => {
 				const isInPhilippines =
 					f.properties.place.toLowerCase().includes('philippines') ||
@@ -270,13 +273,25 @@
 						selected,
 						normalizedMagnitude,
 						color: calculateColorForFeature(f, selected)
-					}
+					},
+					id: f.properties.url // `SvelteVirtualList` needs an `id` field.
 				};
-			});
-	});
+			})
+	);
 	const filteredFeatureCollection: GeoJSON.FeatureCollection = $derived({
 		type: 'FeatureCollection',
 		features: filteredEarthquakes
+	});
+
+	const earthquakeListItems = $derived.by(() => {
+		if (!isRefreshing) {
+			return filteredEarthquakes;
+		}
+
+		return [
+			...filteredEarthquakes,
+			{ id: IS_REFRESHING_KEY } as (typeof filteredEarthquakes)[number]
+		];
 	});
 
 	function getMagnitudeColor(mag: number) {
@@ -370,34 +385,36 @@
 		return 'I';
 	}
 
-	// TODO: Investigate why this causes jank every 1,000 ms.
-	$effect(() => {
-		const id = setInterval(() => {
-			now = new Date();
-		}, 1000);
-
-		return () => {
-			clearInterval(id);
-		};
-	});
-
 	let selectedFeature = $state<string>();
 	let accordionRef = $state<HTMLElement | null>(null);
+	let listRef = $state<SvelteVirtualList<(typeof earthquakeListItems)[number]> | null>(null);
 	async function scrollToFeature(id: string) {
-		if (!accordionRef) {
-			return;
-		}
+		// TODO: Switch to https://github.com/jonasgeiler/svelte-tiny-virtual-list, which allows us to manually recompute item heights.
 
-		const feature = accordionRef.querySelector(`[data-id="${id}"]`);
-		if (!feature) {
-			return;
-		}
+		const scroll = async () => {
+			const waitForAnimationFrame = () =>
+				new Promise<void>((resolve) =>
+					requestAnimationFrame(() => {
+						resolve();
+					})
+				);
 
-		await tick();
-		feature.scrollIntoView({
-			behavior: 'smooth',
-			block: 'nearest'
-		});
+			if (!listRef) {
+				return;
+			}
+
+			await tick();
+			await waitForAnimationFrame();
+			listRef.scroll({
+				index: filteredEarthquakes.findIndex((f) => f.properties.url === id),
+				smoothScroll: true,
+				align: 'top'
+			});
+		};
+
+		setTimeout(() => {
+			scroll();
+		}, 300);
 	}
 
 	function normalizeMagnitude(magnitude: number) {
@@ -600,86 +617,91 @@
 				}}
 				class="flex-1 overflow-auto px-4 pb-4 [&>li]:not-first:mt-2"
 			>
-				{#each filteredEarthquakes as feature (feature.properties.url)}
-					{@const time = new Date(feature.properties.time)}
-					<Accordion.Item value={feature.properties.url} data-id={feature.properties.url}>
-						<Accordion.Trigger class="group flex items-center gap-4 !no-underline">
-							<div class="relative">
-								<div
-									class="rounded-md bg-(--magnitude-bg-color) px-1.5 py-0.5 text-2xl font-medium tracking-tight text-(--magnitude-fg-color) dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
-									style={getMagnitudeColor(feature.properties.mag ?? 0)}
-									aria-label="Magnitude {(feature.properties.mag ?? 0).toFixed(1)} -"
-								>
-									{(feature.properties.mag ?? 0).toFixed(1)}
-								</div>
-								{#if feature.properties.mmi}
-									<div
-										class="absolute -right-2 -bottom-3 rounded border border-(--magnitude-fg-color)/50 bg-(--magnitude-bg-color) px-0.5 text-xs font-bold text-(--magnitude-fg-color) shadow-md dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
-										style={getMagnitudeColor(feature.properties.mmi ?? 0)}
-										aria-label="Intensity - {asIntensity(feature.properties.mmi)}"
+				<SvelteVirtualList bind:this={listRef} items={earthquakeListItems}>
+					{#snippet renderItem(feature)}
+						<!-- {#each filteredEarthquakes as feature (feature.properties.url)} -->
+						{#if feature.id === IS_REFRESHING_KEY}
+							<div class="relative h-17 w-full shrink-0">
+								<Spinner class="absolute top-1/2 left-1/2 -translate-1/2 animate-spin" />
+							</div>
+						{:else}
+							{@const time = new Date(feature.properties.time)}
+							<Accordion.Item value={feature.properties.url}>
+								<Accordion.Trigger class="group flex items-center gap-4 !no-underline">
+									<div class="relative">
+										<div
+											class="rounded-md bg-(--magnitude-bg-color) px-1.5 py-0.5 text-2xl font-medium tracking-tight text-(--magnitude-fg-color) dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
+											style={getMagnitudeColor(feature.properties.mag ?? 0)}
+											aria-label="Magnitude {(feature.properties.mag ?? 0).toFixed(1)} -"
+										>
+											{(feature.properties.mag ?? 0).toFixed(1)}
+										</div>
+										{#if feature.properties.mmi}
+											<div
+												class="absolute -right-2 -bottom-3 rounded border border-(--magnitude-fg-color)/50 bg-(--magnitude-bg-color) px-0.5 text-xs font-bold text-(--magnitude-fg-color) shadow-md dark:bg-(--magnitude-bg-color-dark) dark:text-(--magnitude-fg-color-dark)"
+												style={getMagnitudeColor(feature.properties.mmi ?? 0)}
+												aria-label="Intensity - {asIntensity(feature.properties.mmi)}"
+											>
+												{asIntensity(feature.properties.mmi)}
+											</div>
+										{/if}
+									</div>
+									<div class="flex-1">
+										<div class="font-medium group-hover:underline">
+											{feature.properties.place}
+										</div>
+										<div class="text-xs font-normal text-muted-foreground">
+											{formatDateWithTimezone(time, clientDateFormatter)}
+										</div>
+									</div>
+								</Accordion.Trigger>
+								<Accordion.Content hiddenUntilFound class="space-y-2">
+									<dl
+										class="[&_dt]:text-xs [&_dt]:font-medium [&_dt]:text-muted-foreground [&_dt]:not-first:mt-2 [&dd]:text-sm"
 									>
-										{asIntensity(feature.properties.mmi)}
+										<dt>Local time</dt>
+										<dd>
+											<div>
+												{localDateFormatter.format(time)} (UTC+08:00)
+											</div>
+											<div>
+												{timeAgo(time, now)}
+											</div>
+										</dd>
+										<dt>Location</dt>
+										<dd class="tabular-nums">
+											{feature.geometry.coordinates[1].toFixed(3)}&deg;N
+											{feature.geometry.coordinates[0].toFixed(3)}&deg;W
+										</dd>
+										<dt>Depth</dt>
+										<dd>{feature.geometry.coordinates[2].toFixed(1)} km</dd>
+									</dl>
+									<div class="flex flex-wrap items-center gap-2">
+										<Button
+											onclick={() => {
+												map?.flyTo({
+													center: [
+														feature.geometry.coordinates[0],
+														feature.geometry.coordinates[1]
+													] satisfies [number, number],
+													zoom: 8
+												});
+											}}
+										>
+											<LocateIcon />
+											Locate
+										</Button>
+										<Button href={feature.properties.url} target="_blank" variant="link">
+											More details
+											<ExternalLinkIcon aria-hidden="true" />
+										</Button>
 									</div>
-								{/if}
-							</div>
-							<div class="flex-1">
-								<div class="font-medium group-hover:underline">
-									{feature.properties.place}
-								</div>
-								<div class="text-xs font-normal text-muted-foreground">
-									{formatDateWithTimezone(time, clientDateFormatter)}
-								</div>
-							</div>
-						</Accordion.Trigger>
-						<Accordion.Content class="space-y-2">
-							<dl
-								class="[&_dt]:text-xs [&_dt]:font-medium [&_dt]:text-muted-foreground [&_dt]:not-first:mt-2 [&dd]:text-sm"
-							>
-								<dt>Local time</dt>
-								<dd>
-									<div>
-										{localDateFormatter.format(time)} (UTC+08:00)
-									</div>
-									<div>
-										{timeAgo(time, now)}
-									</div>
-								</dd>
-								<dt>Location</dt>
-								<dd class="tabular-nums">
-									{feature.geometry.coordinates[1].toFixed(3)}&deg;N
-									{feature.geometry.coordinates[0].toFixed(3)}&deg;W
-								</dd>
-								<dt>Depth</dt>
-								<dd>{feature.geometry.coordinates[2].toFixed(1)} km</dd>
-							</dl>
-							<div class="flex flex-wrap items-center gap-2">
-								<Button
-									onclick={() => {
-										map?.flyTo({
-											center: [
-												feature.geometry.coordinates[0],
-												feature.geometry.coordinates[1]
-											] satisfies [number, number],
-											zoom: 8
-										});
-									}}
-								>
-									<LocateIcon />
-									Locate
-								</Button>
-								<Button href={feature.properties.url} target="_blank" variant="link">
-									More details
-									<ExternalLinkIcon aria-hidden="true" />
-								</Button>
-							</div>
-						</Accordion.Content>
-					</Accordion.Item>
-				{/each}
-				{#if isRefreshing}
-					<div class="relative h-17 w-full shrink-0">
-						<Spinner class="absolute top-1/2 left-1/2 -translate-1/2 animate-spin" />
-					</div>
-				{/if}
+								</Accordion.Content>
+							</Accordion.Item>
+							<!-- {/each} -->
+						{/if}
+					{/snippet}
+				</SvelteVirtualList>
 			</Accordion.Root>
 		{/if}
 		<p class="mx-2 my-1 text-center text-xs text-muted-foreground">
@@ -728,8 +750,8 @@
 							return;
 						}
 
-						await scrollToFeature(id);
 						selectedFeature = id;
+						scrollToFeature(id);
 					}}
 				/>
 			</GeoJSON>
