@@ -457,8 +457,17 @@
 		return colorHex;
 	}
 
-	const clientDateFormatter = new Intl.DateTimeFormat();
-	const localDateFormatter = new Intl.DateTimeFormat(undefined, { timeZone: 'Asia/Manila' });
+	const dateStyle: Intl.DateTimeFormatOptions['dateStyle'] = 'short';
+	const timeStyle: Intl.DateTimeFormatOptions['timeStyle'] = 'long';
+	const clientDateFormatter = new Intl.DateTimeFormat(undefined, {
+		dateStyle,
+		timeStyle
+	});
+	const localDateFormatter = new Intl.DateTimeFormat(undefined, {
+		timeZone: 'Asia/Manila',
+		dateStyle,
+		timeStyle
+	});
 
 	let map = $state<maplibregl.Map>();
 </script>
