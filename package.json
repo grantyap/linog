@@ -66,7 +66,7 @@
 		"vitest-browser-svelte": "^1.1.0"
 	},
 	"dependencies": {
-		"@humanspeak/svelte-virtual-list": "^0.3.5",
+		"@tanstack/svelte-virtual": "^3.13.12",
 		"cheerio": "^1.1.2",
 		"culori": "^4.0.2",
 		"svelte-maplibre": "^1.2.2"
