@@ -739,19 +739,32 @@
 						'circle-opacity': 0.8
 					}}
 					onclick={async (e) => {
-						let id = e.features[0].properties?.url;
-						if (!id) {
-							return;
-						}
-						if (typeof id === 'number') {
-							id = id.toString();
-						}
-						if (typeof id !== 'string') {
+						if (!e.features || e.features.length === 0) {
 							return;
 						}
 
-						selectedFeature = id;
-						scrollToFeature(id);
+						const featureUrls = e.features
+							.map((f) => f.properties?.url)
+							.filter((url): url is string => typeof url === 'string');
+
+						if (featureUrls.length === 0) {
+							return;
+						}
+
+						let nextFeatureUrl: string;
+						if (selectedFeature && featureUrls.includes(selectedFeature)) {
+							// Cycle through the list of features so users can select the ones behind them.
+							const currentIndex = featureUrls.indexOf(selectedFeature);
+							const nextIndex = (currentIndex + 1) % featureUrls.length;
+							nextFeatureUrl = featureUrls[nextIndex];
+						} else {
+							// If no feature is selected or the selected feature is not in the current click,
+							// select the first one.
+							nextFeatureUrl = featureUrls[0];
+						}
+
+						selectedFeature = nextFeatureUrl;
+						scrollToFeature(nextFeatureUrl);
 					}}
 				/>
 			</GeoJSON>
