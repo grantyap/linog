@@ -9,11 +9,11 @@
 	import { formatDateWithTimezone, timeAgo } from '$lib/datetime';
 	import { earthquakeDataSchema, type EarthquakeData } from '$lib/usgs/schema';
 	import { cn } from '$lib/utils';
-	import SvelteVirtualList from '@humanspeak/svelte-virtual-list';
 	import { EarthIcon, ExternalLinkIcon, LocateIcon, SearchIcon } from '@lucide/svelte';
+	import { createVirtualizer } from '@tanstack/svelte-virtual';
 	import { formatHex, oklch, parse, type Color, type Oklch } from 'culori';
 	import { mode } from 'mode-watcher';
-	import { onMount, tick } from 'svelte';
+	import { onMount } from 'svelte';
 	import { CircleLayer, GeoJSON, MapLibre } from 'svelte-maplibre';
 	import type { PageProps } from './$types';
 
@@ -386,35 +386,66 @@
 	}
 
 	let selectedFeature = $state<string>();
+	let scrollWrapperRef = $state<HTMLDivElement | null>(null);
 	let accordionRef = $state<HTMLElement | null>(null);
-	let listRef = $state<SvelteVirtualList<(typeof earthquakeListItems)[number]> | null>(null);
-	async function scrollToFeature(id: string) {
-		// TODO: Switch to https://github.com/jonasgeiler/svelte-tiny-virtual-list, which allows us to manually recompute item heights.
+	const rowVirtualizer = $derived(
+		createVirtualizer({
+			count: filteredEarthquakes.length,
+			getScrollElement: scrollWrapperRef ? () => scrollWrapperRef : () => null,
+			estimateSize: () => 293,
+			getItemKey: (index) => filteredEarthquakes[index].properties.url ?? index
+		})
+	);
 
-		const scroll = async () => {
-			const waitForAnimationFrame = () =>
-				new Promise<void>((resolve) =>
-					requestAnimationFrame(() => {
-						resolve();
-					})
-				);
+	let virtualItemEls = $state<HTMLDivElement[]>([]);
+	let resizeObserver = $state<ResizeObserver | null>(null);
 
-			if (!listRef) {
-				return;
+	onMount(() => {
+		resizeObserver = new ResizeObserver((entries) => {
+			for (const entry of entries) {
+				if (entry.target instanceof HTMLElement) {
+					$rowVirtualizer.measureElement(entry.target);
+				}
 			}
+		});
 
-			await tick();
-			await waitForAnimationFrame();
-			listRef.scroll({
-				index: filteredEarthquakes.findIndex((f) => f.properties.url === id),
-				smoothScroll: true,
-				align: 'top'
-			});
+		return () => {
+			resizeObserver?.disconnect();
 		};
+	});
 
-		setTimeout(() => {
-			scroll();
-		}, 300);
+	$effect(() => {
+		if (!resizeObserver) {
+			return;
+		}
+
+		for (const el of virtualItemEls) {
+			if (el) {
+				resizeObserver.observe(el);
+			}
+		}
+
+		return () => {
+			for (const el of virtualItemEls) {
+				if (el) {
+					resizeObserver?.unobserve(el);
+				}
+			}
+		};
+	});
+
+	async function scrollToFeature(id: string) {
+		if (!rowVirtualizer) {
+			return;
+		}
+
+		$rowVirtualizer.scrollToIndex(
+			filteredEarthquakes.findIndex((f) => f.properties.url === id),
+			{
+				align: 'start',
+				behavior: 'auto'
+			}
+		);
 	}
 
 	function normalizeMagnitude(magnitude: number) {
@@ -596,37 +627,57 @@
 				</Empty.Header>
 			</Empty.Root>
 		{:else}
-			<Accordion.Root
-				bind:ref={accordionRef}
-				type="single"
-				bind:value={selectedFeature}
-				onValueChange={(e) => {
-					if (!e) {
-						return;
-					}
+			<div bind:this={scrollWrapperRef} class="flex-1 overflow-auto px-4 pb-4">
+				<Accordion.Root
+					bind:ref={accordionRef}
+					type="single"
+					bind:value={
+						() => selectedFeature,
+						(id) => {
+							const previousScrollTop = $rowVirtualizer.scrollOffset;
+							selectedFeature = id;
 
-					const feature = filteredEarthquakes.find((f) => f.properties.url === e);
-					if (!feature) {
-						return;
-					}
+							if (previousScrollTop) {
+								$rowVirtualizer.scrollToOffset(previousScrollTop);
+							}
 
-					map?.flyTo({
-						center: [feature.geometry.coordinates[0], feature.geometry.coordinates[1]],
-						zoom: 8
-					});
-				}}
-				class="flex-1 overflow-auto px-4 pb-4 [&>li]:not-first:mt-2"
-			>
-				<SvelteVirtualList bind:this={listRef} items={earthquakeListItems}>
-					{#snippet renderItem(feature)}
-						<!-- {#each filteredEarthquakes as feature (feature.properties.url)} -->
-						{#if feature.id === IS_REFRESHING_KEY}
-							<div class="relative h-17 w-full shrink-0">
-								<Spinner class="absolute top-1/2 left-1/2 -translate-1/2 animate-spin" />
-							</div>
-						{:else}
+							if (selectedFeature) {
+								scrollToFeature(selectedFeature);
+							}
+						}
+					}
+					onValueChange={(e) => {
+						if (!e) {
+							return;
+						}
+
+						const feature = filteredEarthquakes.find((f) => f.properties.url === e);
+						if (!feature) {
+							return;
+						}
+
+						map?.flyTo({
+							center: [feature.geometry.coordinates[0], feature.geometry.coordinates[1]],
+							zoom: 8
+						});
+					}}
+					class="relative [&>li]:not-first:mt-2"
+					style="height: {$rowVirtualizer.getTotalSize()}px"
+				>
+					{#each $rowVirtualizer.getVirtualItems() as item (item.key)}
+						{@const feature = filteredEarthquakes.at(item.index)}
+						{#if feature}
 							{@const time = new Date(feature.properties.time)}
-							<Accordion.Item value={feature.properties.url}>
+							<Accordion.Item
+								bind:ref={
+									() => virtualItemEls[item.index] ?? null,
+									(ref) => (virtualItemEls[item.index] = ref)
+								}
+								value={feature.properties.url}
+								class="absolute top-0 left-0 w-full"
+								style="transform: translateY({item.start}px);"
+								data-index={item.index}
+							>
 								<Accordion.Trigger class="group flex items-center gap-4 !no-underline">
 									<div class="relative">
 										<div
@@ -698,11 +749,15 @@
 									</div>
 								</Accordion.Content>
 							</Accordion.Item>
-							<!-- {/each} -->
 						{/if}
-					{/snippet}
-				</SvelteVirtualList>
-			</Accordion.Root>
+					{/each}
+				</Accordion.Root>
+				{#if isRefreshing}
+					<div class="relative h-17 w-full shrink-0">
+						<Spinner class="absolute top-1/2 left-1/2 -translate-1/2 animate-spin" />
+					</div>
+				{/if}
+			</div>
 		{/if}
 		<p class="mx-2 my-1 text-center text-xs text-muted-foreground">
 			<a href="https://grantyap.com" target="_blank" class="underline">
